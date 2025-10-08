@@ -1,0 +1,23 @@
+{
+  "name": "Infratic",
+  "version": "1.0.0",
+  "description": "Solana Blockchain Library for ESP32 - Complete SPL Token, PDA, and Anchor Framework Support",
+  "keywords": ["solana", "esp32", "blockchain", "anchor", "iot", "spl-token", "web3", "depin"],
+  "authors": [
+    {
+      "name": "asimbugra",
+      "email": "asimbugra1@gmail.com"
+    }
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/infraticxyz-lab/Infratic-lib",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/infraticxyz-lab/Infratic-lib.git"
+  },
+  "frameworks": ["arduino"],
+  "platforms": ["espressif32"],
+  "dependencies": {
+    "ArduinoJson": "^6.21.5"
+  }
+}
