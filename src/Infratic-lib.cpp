@@ -1944,8 +1944,7 @@ bool Infratic::initializeZKStorage(
     String &outTxSignature)
 {
     Serial.println("\n=== Initialize ZK Storage in Anchor ===");
-    Serial.println("Seed name length: " + String(seedName.length()));
-    Serial.println("Seed name: " + seedName);
+
     // 1. Decode private key
     uint8_t privateKey[128];
     size_t privLen = sizeof(privateKey);
@@ -1956,9 +1955,16 @@ bool Infratic::initializeZKStorage(
     }
 
     // 2. Derive PDA
+    std::vector<uint8_t> authorityBytes = base58ToPubkey(authorityPubkey);
+    if (authorityBytes.size() != 32) {
+        Serial.println("❌ Authority pubkey decode failed");
+        return false;
+    }
+
     std::vector<std::vector<uint8_t>> seeds = {
         std::vector<uint8_t>(seedName.begin(), seedName.end()),
-        base58ToPubkey(authorityPubkey)};
+        authorityBytes
+    };
 
     uint8_t bump;
     if (!derivePDA(seeds, programId, outPDA, bump))
@@ -1967,9 +1973,27 @@ bool Infratic::initializeZKStorage(
         return false;
     }
 
-    Serial.println("✅ PDA: " + outPDA);
+    Serial.println("✅ PDA derived: " + outPDA);
+    Serial.printf("   Bump: %d\n", bump);
 
-    // 3. Build instruction
+    // 3. CHECK IF ACCOUNT ALREADY EXISTS
+    Serial.println("\n📋 Checking if account already exists...");
+    
+    uint64_t accountBalance = 0;
+    if (getSolBalance(outPDA, accountBalance)) {
+        // Account exists
+        if (accountBalance > 0) {
+            Serial.println("⚠️  Account already initialized");
+            Serial.printf("   Balance: %llu lamports\n", accountBalance);
+            Serial.println("✅ Skipping initialization (account found)\n");
+            outTxSignature = "EXISTING_ACCOUNT";
+            return true;  // ← Return success, account already exists
+        }
+    }
+
+    // 4. Account doesn't exist, create it
+    Serial.println("📝 Account not found, creating new one...\n");
+
     Keypair signer = Keypair::fromPrivateKey(privateKey);
     Pubkey authority = Pubkey::fromBase58(authorityPubkey);
     Pubkey pda = Pubkey::fromBase58(outPDA);
