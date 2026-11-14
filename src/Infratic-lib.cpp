@@ -1,4 +1,44 @@
 #include "Infratic-lib.h"
+#include <stdarg.h>
+
+// ============================================================================
+// LOGGING
+// ============================================================================
+
+static uint8_t g_infraticLogLevel = INFRATIC_LOG_INFO;
+
+namespace
+{
+    struct InfraticLog
+    {
+        uint8_t level;
+
+        bool on() const { return g_infraticLogLevel >= level; }
+        template <typename T>
+        void print(const T &v) { if (on()) Serial.print(v); }
+        template <typename T>
+        void println(const T &v) { if (on()) Serial.println(v); }
+        void println() { if (on()) Serial.println(); }
+        void printf(const char *fmt, ...) __attribute__((format(printf, 2, 3)))
+        {
+            if (!on()) return;
+            char buf[256];
+            va_list args;
+            va_start(args, fmt);
+            vsnprintf(buf, sizeof(buf), fmt, args);
+            va_end(args);
+            Serial.print(buf);
+        }
+    };
+
+    InfraticLog _logErr{INFRATIC_LOG_ERROR};
+    InfraticLog _logInfo{INFRATIC_LOG_INFO};
+}
+
+void Infratic::setLogLevel(uint8_t level)
+{
+    g_infraticLogLevel = level;
+}
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -203,7 +243,7 @@ static String toBase64(const uint8_t *data, size_t len)
     int ret = mbedtls_base64_encode(outBuf.data(), outBuf.size(), &olen, data, len);
     if (ret != 0)
     {
-        Serial.println("❌ Base64 encoding error: " + String(ret));
+        _logErr.println("❌ Base64 encoding error: " + String(ret));
         return "";
     }
     return String((const char *)outBuf.data()).substring(0, olen);
@@ -215,7 +255,7 @@ std::vector<uint8_t> base58ToPubkey(const String &base58Str)
     size_t len = sizeof(buffer);
     if (!base58Decode(base58Str, buffer, len) || len != 32)
     {
-        Serial.println("❌ base58ToPubkey: Invalid base58 input!");
+        _logErr.println("❌ base58ToPubkey: Invalid base58 input!");
         return {};
     }
     return std::vector<uint8_t>(buffer, buffer + 32);
@@ -241,7 +281,7 @@ String Infratic::getLatestBlockhash()
 
     for (int attempt = 1; attempt <= maxRetries; attempt++)
     {
-        Serial.printf("🌐 Fetching blockhash (attempt %d/%d)...\n", attempt, maxRetries);
+        _logInfo.printf("🌐 Fetching blockhash (attempt %d/%d)...\n", attempt, maxRetries);
 
         WiFiClientSecure client;
         client.setInsecure();
@@ -249,7 +289,7 @@ String Infratic::getLatestBlockhash()
 
         if (!http.begin(client, _rpcUrl))
         {
-            Serial.println("❌ HTTP begin failed");
+            _logErr.println("❌ HTTP begin failed");
             delay(retryDelayMs);
             continue;
         }
@@ -273,7 +313,7 @@ String Infratic::getLatestBlockhash()
             String blockhash = doc["result"]["value"]["blockhash"].as<String>();
             if (!blockhash.isEmpty())
             {
-                Serial.println("✅ Blockhash: " + blockhash);
+                _logInfo.println("✅ Blockhash: " + blockhash);
                 return blockhash;
             }
         }
@@ -281,7 +321,7 @@ String Infratic::getLatestBlockhash()
         delay(retryDelayMs);
     }
 
-    Serial.println("❌ Failed to get blockhash");
+    _logErr.println("❌ Failed to get blockhash");
     return "";
 }
 
@@ -293,7 +333,7 @@ bool Infratic::getBlockHeight(uint64_t &outBlockHeight)
 
     if (!http.begin(client, _rpcUrl))
     {
-        Serial.println("❌ getBlockHeight: HTTP begin failed");
+        _logErr.println("❌ getBlockHeight: HTTP begin failed");
         return false;
     }
 
@@ -328,7 +368,7 @@ bool Infratic::getEpochInfo(EpochInfo &outEpochInfo)
 
     if (!http.begin(client, _rpcUrl))
     {
-        Serial.println("❌ getEpochInfo: HTTP begin failed");
+        _logErr.println("❌ getEpochInfo: HTTP begin failed");
         return false;
     }
 
@@ -373,7 +413,7 @@ bool Infratic::getSolBalance(const String &walletPubkeyBase58, uint64_t &outLamp
 
     if (!http.begin(client, _rpcUrl))
     {
-        Serial.println("❌ getSolBalance: HTTP begin failed");
+        _logErr.println("❌ getSolBalance: HTTP begin failed");
         return false;
     }
 
@@ -400,7 +440,7 @@ bool Infratic::getSolBalance(const String &walletPubkeyBase58, uint64_t &outLamp
 
     if (doc["error"])
     {
-        Serial.println("❌ RPC Error: " + doc["error"]["message"].as<String>());
+        _logErr.println("❌ RPC Error: " + doc["error"]["message"].as<String>());
         return false;
     }
 
@@ -414,7 +454,7 @@ bool Infratic::getSplTokenBalance(const String &walletPubkeyBase58, const String
     String ataAddress;
     if (!findAssociatedTokenAccount(walletPubkeyBase58, tokenMintBase58, ataAddress))
     {
-        Serial.println("⚠️ ATA not found, balance = 0");
+        _logErr.println("⚠️ ATA not found, balance = 0");
         outBalance = 0;
         return true;
     }
@@ -576,7 +616,7 @@ bool Infratic::sendSol(const String &privateKeyBase58, const String &fromPubkeyB
     size_t privateKeyLen = sizeof(privateKey);
     if (!base58Decode(privateKeyBase58, privateKey, privateKeyLen))
     {
-        Serial.println("❌ Private key decode error");
+        _logErr.println("❌ Private key decode error");
         return false;
     }
 
@@ -585,13 +625,13 @@ bool Infratic::sendSol(const String &privateKeyBase58, const String &fromPubkeyB
 
     if (!base58Decode(fromPubkeyBase58, fromPub, fromLen) || fromLen != 32)
     {
-        Serial.println("❌ From pubkey decode error");
+        _logErr.println("❌ From pubkey decode error");
         return false;
     }
 
     if (!base58Decode(toPubkeyBase58, toPub, toLen) || toLen != 32)
     {
-        Serial.println("❌ To pubkey decode error");
+        _logErr.println("❌ To pubkey decode error");
         return false;
     }
 
@@ -613,7 +653,7 @@ bool Infratic::sendSol(const String &privateKeyBase58, const String &fromPubkeyB
         return false;
     }
 
-    Serial.println("✅ Transaction Signature: " + signature);
+    _logInfo.println("✅ Transaction Signature: " + signature);
     return true;
 }
 
@@ -627,7 +667,7 @@ bool Infratic::sendProgramDataTransaction(const String &privateKeyBase58,
     size_t privateKeyLen = sizeof(privateKey);
     if (!base58Decode(privateKeyBase58, privateKey, privateKeyLen) || privateKeyLen < 64)
     {
-        Serial.println("❌ Private key decode error");
+        _logErr.println("❌ Private key decode error");
         return false;
     }
 
@@ -635,7 +675,7 @@ bool Infratic::sendProgramDataTransaction(const String &privateKeyBase58,
     size_t fromLen = sizeof(fromPub);
     if (!base58Decode(fromPubkeyBase58, fromPub, fromLen) || fromLen != 32)
     {
-        Serial.println("❌ Public key decode error");
+        _logErr.println("❌ Public key decode error");
         return false;
     }
 
@@ -658,15 +698,15 @@ bool Infratic::sendProgramDataTransaction(const String &privateKeyBase58,
         return false;
     }
 
-    Serial.println("✅ Tx Signature: " + signature);
+    _logInfo.println("✅ Tx Signature: " + signature);
 
     if (!confirmTransaction(signature, confirmWaitMs))
     {
-        Serial.println("⚠️ Transaction NOT confirmed in time");
+        _logErr.println("⚠️ Transaction NOT confirmed in time");
         return false;
     }
 
-    Serial.println("✅ Transaction confirmed");
+    _logInfo.println("✅ Transaction confirmed");
     return true;
 }
 
@@ -678,7 +718,7 @@ bool Infratic::sendRawTransaction(const String &txBase64, String &outSignature)
 
     if (!http.begin(client, _rpcUrl))
     {
-        Serial.println("❌ HTTP begin failed");
+        _logErr.println("❌ HTTP begin failed");
         return false;
     }
 
@@ -690,8 +730,8 @@ bool Infratic::sendRawTransaction(const String &txBase64, String &outSignature)
     int code = http.POST(body);
     if (code != 200)
     {
-        Serial.printf("❌ HTTP code: %d\n", code);
-        Serial.println(http.getString());
+        _logErr.printf("❌ HTTP code: %d\n", code);
+        _logInfo.println(http.getString());
         http.end();
         return false;
     }
@@ -702,13 +742,13 @@ bool Infratic::sendRawTransaction(const String &txBase64, String &outSignature)
     DynamicJsonDocument doc(2048);
     if (deserializeJson(doc, response))
     {
-        Serial.println("❌ JSON parse error");
+        _logErr.println("❌ JSON parse error");
         return false;
     }
 
     if (doc["error"])
     {
-        Serial.println("❌ RPC Error: " + doc["error"]["message"].as<String>());
+        _logErr.println("❌ RPC Error: " + doc["error"]["message"].as<String>());
         return false;
     }
 
@@ -767,7 +807,7 @@ bool Infratic::confirmTransaction(const String &signature, uint32_t maxWaitMs)
 
             if ((confStatus == "confirmed" || confStatus == "finalized") && errNull)
             {
-                Serial.println("✅ Transaction confirmed");
+                _logInfo.println("✅ Transaction confirmed");
                 return true;
             }
         }
@@ -776,7 +816,7 @@ bool Infratic::confirmTransaction(const String &signature, uint32_t maxWaitMs)
         waited += pollIntervalMs;
     }
 
-    Serial.println("⏱️ Timeout: Transaction not confirmed");
+    _logInfo.println("⏱️ Timeout: Transaction not confirmed");
     return false;
 }
 
@@ -828,7 +868,7 @@ bool Infratic::rpcCall(const String &method, const String &paramsJson, String &o
 
     if (!http.begin(client, _rpcUrl))
     {
-        Serial.println("❌ " + method + ": HTTP begin failed");
+        _logErr.println("❌ " + method + ": HTTP begin failed");
         return false;
     }
 
@@ -838,7 +878,7 @@ bool Infratic::rpcCall(const String &method, const String &paramsJson, String &o
     int code = http.POST(body);
     if (code != 200)
     {
-        Serial.printf("❌ %s: HTTP code %d\n", method.c_str(), code);
+        _logErr.printf("❌ %s: HTTP code %d\n", method.c_str(), code);
         http.end();
         return false;
     }
@@ -851,12 +891,12 @@ bool Infratic::rpcCall(const String &method, const String &paramsJson, String &o
     DynamicJsonDocument err(512);
     if (deserializeJson(err, outResponse, DeserializationOption::Filter(filter)))
     {
-        Serial.println("❌ " + method + ": JSON parse error");
+        _logErr.println("❌ " + method + ": JSON parse error");
         return false;
     }
     if (!err["error"].isNull())
     {
-        Serial.println("❌ " + method + " RPC error: " + err["error"]["message"].as<String>());
+        _logErr.println("❌ " + method + " RPC error: " + err["error"]["message"].as<String>());
         return false;
     }
     return true;
@@ -875,7 +915,7 @@ bool Infratic::getAccountData(const String &accountBase58, std::vector<uint8_t> 
     DynamicJsonDocument doc(jsonCapacity(response));
     if (deserializeJson(doc, response))
     {
-        Serial.println("❌ getAccountInfo: JSON parse error");
+        _logErr.println("❌ getAccountInfo: JSON parse error");
         return false;
     }
 
@@ -883,7 +923,7 @@ bool Infratic::getAccountData(const String &accountBase58, std::vector<uint8_t> 
     const char *data = value["data"][0];
     if (value.isNull() || !data)
     {
-        Serial.println("❌ getAccountInfo: account not found " + accountBase58);
+        _logErr.println("❌ getAccountInfo: account not found " + accountBase58);
         return false;
     }
 
@@ -928,7 +968,7 @@ bool Infratic::getProgramAccounts(const String &programIdBase58, const std::vect
     DynamicJsonDocument doc(jsonCapacity(response));
     if (deserializeJson(doc, response))
     {
-        Serial.println("❌ getProgramAccounts: JSON parse error (response too big? add filters)");
+        _logErr.println("❌ getProgramAccounts: JSON parse error (response too big? add filters)");
         return false;
     }
 
@@ -964,7 +1004,7 @@ bool Infratic::getSignaturesForAddress(const String &addressBase58, std::vector<
     DynamicJsonDocument doc(jsonCapacity(response));
     if (deserializeJson(doc, response))
     {
-        Serial.println("❌ getSignaturesForAddress: JSON parse error");
+        _logErr.println("❌ getSignaturesForAddress: JSON parse error");
         return false;
     }
 
@@ -1042,7 +1082,7 @@ bool Infratic::signMessageFromBase58(const std::vector<uint8_t> &message,
     size_t privateKeyLen = sizeof(privateKey);
     if (!base58Decode(privateKeyBase58, privateKey, privateKeyLen) || privateKeyLen < 64)
     {
-        Serial.println("❌ Failed to decode private key");
+        _logErr.println("❌ Failed to decode private key");
         return false;
     }
 
@@ -1059,7 +1099,7 @@ bool Infratic::signMessageRaw(const std::vector<uint8_t> &message,
 {
     if (privateKey.size() < 64)
     {
-        Serial.println("❌ Invalid private key size");
+        _logErr.println("❌ Invalid private key size");
         return false;
     }
 
@@ -1081,26 +1121,26 @@ bool Infratic::derivePDA(const std::vector<std::vector<uint8_t>> &seeds,
     std::vector<uint8_t> programId = base58ToPubkey(programIdBase58);
     if (programId.size() != 32)
     {
-        Serial.println("❌ Invalid program ID");
+        _logErr.println("❌ Invalid program ID");
         return false;
     }
 
     std::vector<uint8_t> pdaBytes;
     if (!findProgramAddress(seeds, programId, pdaBytes, outBump))
     {
-        Serial.println("❌ Failed to derive PDA");
+        _logErr.println("❌ Failed to derive PDA");
         return false;
     }
 
     outPDABase58 = base58Encode(pdaBytes.data(), pdaBytes.size());
     if (outPDABase58.isEmpty())
     {
-        Serial.println("❌ Failed to encode PDA to Base58");
+        _logErr.println("❌ Failed to encode PDA to Base58");
         return false;
     }
 
-    Serial.println("✅ Derived PDA: " + outPDABase58);
-    Serial.println("   Bump: " + String(outBump));
+    _logInfo.println("✅ Derived PDA: " + outPDABase58);
+    _logInfo.println("   Bump: " + String(outBump));
 
     return true;
 }
@@ -1112,14 +1152,14 @@ bool Infratic::findProgramAddress(const std::vector<std::vector<uint8_t>> &seeds
     // Solana limits: max 16 seeds (bump included), each max 32 bytes
     if (programId.size() != 32 || seeds.size() > 15)
     {
-        Serial.println("❌ Invalid PDA input (program id or seed count)");
+        _logErr.println("❌ Invalid PDA input (program id or seed count)");
         return false;
     }
     for (const auto &seed : seeds)
     {
         if (seed.size() > 32)
         {
-            Serial.println("❌ PDA seed longer than 32 bytes");
+            _logErr.println("❌ PDA seed longer than 32 bytes");
             return false;
         }
     }
@@ -1157,7 +1197,7 @@ bool Infratic::findProgramAddress(const std::vector<std::vector<uint8_t>> &seeds
         return true;
     }
 
-    Serial.println("❌ No valid PDA found");
+    _logErr.println("❌ No valid PDA found");
     return false;
 }
 
@@ -1202,7 +1242,7 @@ bool Infratic::buildAndSignTransaction(const uint8_t *privateKey, size_t privLen
 {
     if (privLen < 64)
     {
-        Serial.println("❌ Invalid private key length");
+        _logErr.println("❌ Invalid private key length");
         return false;
     }
 
@@ -1236,14 +1276,14 @@ bool Infratic::buildAndSignMemoTransaction(const uint8_t *privateKey, size_t pri
 {
     if (privLen < 64)
     {
-        Serial.println("❌ Invalid private key");
+        _logErr.println("❌ Invalid private key");
         return false;
     }
 
     Pubkey programId = Pubkey::fromBase58(programIdBase58);
     if (programId.data.size() != 32)
     {
-        Serial.println("❌ Program ID decode error");
+        _logErr.println("❌ Program ID decode error");
         return false;
     }
 
@@ -1384,7 +1424,7 @@ std::vector<uint8_t> Transaction::serializeMessage() const
 {
     if (fee_payer.data.size() != 32)
     {
-        Serial.println("❌ Transaction: fee payer not set");
+        _logErr.println("❌ Transaction: fee payer not set");
         return {};
     }
 
@@ -1395,7 +1435,7 @@ std::vector<uint8_t> Transaction::serializeMessage() const
     {
         if (k.key.data.size() != 32)
         {
-            Serial.println("❌ Transaction: invalid public key in accounts");
+            _logErr.println("❌ Transaction: invalid public key in accounts");
             return {};
         }
     }
@@ -1404,7 +1444,7 @@ std::vector<uint8_t> Transaction::serializeMessage() const
     size_t bhLen = sizeof(blockhash);
     if (!base58Decode(recent_blockhash, blockhash, bhLen) || bhLen != 32)
     {
-        Serial.println("❌ Transaction: invalid recent blockhash");
+        _logErr.println("❌ Transaction: invalid recent blockhash");
         return {};
     }
 
@@ -1460,7 +1500,7 @@ bool Transaction::sign(const std::vector<Keypair> &signers)
 
         if (!found)
         {
-            Serial.println("❌ Missing signer: " + base58Encode(keys[i].key.data.data(), 32));
+            _logErr.println("❌ Missing signer: " + base58Encode(keys[i].key.data.data(), 32));
             ok = false;
             continue;
         }
@@ -1591,8 +1631,8 @@ bool Infratic::createDataCommitment(
     hexStr[64] = '\0';
     outCommitment = String(hexStr);
 
-    Serial.println("✅ Commitment created: " + outCommitment.substring(0, 16) + "...");
-    Serial.printf("   Timestamp saved: %llu\n", outTimestamp);
+    _logInfo.println("✅ Commitment created: " + outCommitment.substring(0, 16) + "...");
+    _logInfo.printf("   Timestamp saved: %llu\n", outTimestamp);
     return true;
 }
 
@@ -1638,13 +1678,13 @@ bool Infratic::verifyDataCommitment(
 
     if (verified)
     {
-        Serial.println("✅ Data verified against commitment");
+        _logInfo.println("✅ Data verified against commitment");
     }
     else
     {
-        Serial.println("❌ Verification failed - data mismatch");
-        Serial.printf("   Expected: %s\n", originalCommitment.c_str());
-        Serial.printf("   Got:      %s\n", hexStr);
+        _logErr.println("❌ Verification failed - data mismatch");
+        _logInfo.printf("   Expected: %s\n", originalCommitment.c_str());
+        _logInfo.printf("   Got:      %s\n", hexStr);
     }
 
     return verified;
@@ -1686,11 +1726,11 @@ bool Infratic::storeCommitmentOnChain(
 
     if (result)
     {
-        Serial.println("✅ Commitment stored on-chain");
+        _logInfo.println("✅ Commitment stored on-chain");
     }
     else
     {
-        Serial.println("❌ Failed to store commitment");
+        _logErr.println("❌ Failed to store commitment");
     }
 
     return result;
@@ -1716,7 +1756,7 @@ bool Infratic::buildMerkleTree(
 {
     if (dataList.empty())
     {
-        Serial.println("❌ Empty data list");
+        _logErr.println("❌ Empty data list");
         return false;
     }
 
@@ -1775,7 +1815,7 @@ bool Infratic::buildMerkleTree(
     }
 
     outRoot = currentLevel[0];
-    Serial.println("✅ Merkle root: " + outRoot.substring(0, 16) + "...");
+    _logInfo.println("✅ Merkle root: " + outRoot.substring(0, 16) + "...");
     return true;
 }
 
@@ -1797,7 +1837,7 @@ bool Infratic::createMerkleProof(
 {
     if (dataIndex >= dataList.size())
     {
-        Serial.println("❌ Invalid data index");
+        _logErr.println("❌ Invalid data index");
         return false;
     }
 
@@ -1878,8 +1918,8 @@ bool Infratic::createMerkleProof(
     outProof.index = dataIndex;
     outProof.isValid = true;
 
-    Serial.printf("✅ Merkle proof created for index %d\n", dataIndex);
-    Serial.printf("   Proof size: %d hashes\n", outProof.siblings.size());
+    _logInfo.printf("✅ Merkle proof created for index %d\n", dataIndex);
+    _logInfo.printf("   Proof size: %d hashes\n", outProof.siblings.size());
     return true;
 }
 
@@ -1947,11 +1987,11 @@ bool Infratic::verifyMerkleProof(
 
     if (verified)
     {
-        Serial.println("✅ Merkle proof verified");
+        _logInfo.println("✅ Merkle proof verified");
     }
     else
     {
-        Serial.println("❌ Merkle proof verification failed");
+        _logErr.println("❌ Merkle proof verification failed");
     }
 
     return verified;
@@ -1983,7 +2023,7 @@ bool Infratic::createRangeProof(
 {
     if (value < minValue || value > maxValue)
     {
-        Serial.println("❌ Value out of range");
+        _logErr.println("❌ Value out of range");
         return false;
     }
 
@@ -2039,9 +2079,9 @@ bool Infratic::createRangeProof(
     outProof.proof = String(hexStr);
     outProof.isValid = true;
 
-    Serial.println("✅ Range proof created");
-    Serial.printf("   Value in range [%lld, %lld]\n", minValue, maxValue);
-    Serial.println("   Commitment: " + outProof.commitment.substring(0, 16) + "...");
+    _logInfo.println("✅ Range proof created");
+    _logInfo.printf("   Value in range [%lld, %lld]\n", minValue, maxValue);
+    _logInfo.println("   Commitment: " + outProof.commitment.substring(0, 16) + "...");
 
     return true;
 }
@@ -2061,12 +2101,12 @@ bool Infratic::verifyRangeProof(
 {
     if (value < proof.minValue || value > proof.maxValue)
     {
-        Serial.println("❌ Value out of declared range");
+        _logErr.println("❌ Value out of declared range");
         return false;
     }
 
-    Serial.println("✅ Range proof verified");
-    Serial.printf("   Value %lld is in range [%lld, %lld]\n",
+    _logInfo.println("✅ Range proof verified");
+    _logInfo.printf("   Value %lld is in range [%lld, %lld]\n",
                   value, proof.minValue, proof.maxValue);
 
     return true;
@@ -2094,8 +2134,8 @@ bool Infratic::createzkSNARKProof(
     const String &circuit,
     zkSNARKProof &outProof)
 {
-    Serial.println("⚠️  zkSNARK: Simplified implementation for ESP32");
-    Serial.println("   For production, use circom + snarkjs");
+    _logErr.println("⚠️  zkSNARK: Simplified implementation for ESP32");
+    _logInfo.println("   For production, use circom + snarkjs");
 
     // Simulate proof generation (real zkSNARK needs elliptic curve operations)
     std::vector<uint8_t> proofData;
@@ -2124,9 +2164,9 @@ bool Infratic::createzkSNARKProof(
     outProof.publicInputs = publicInputs;
     outProof.isValid = true;
 
-    Serial.println("✅ zkSNARK proof generated");
-    Serial.printf("   Proof size: %d bytes\n", proofData.size());
-    Serial.printf("   Public inputs: %d bytes\n", publicInputs.size());
+    _logInfo.println("✅ zkSNARK proof generated");
+    _logInfo.printf("   Proof size: %d bytes\n", proofData.size());
+    _logInfo.printf("   Public inputs: %d bytes\n", publicInputs.size());
 
     return true;
 }
@@ -2144,20 +2184,20 @@ bool Infratic::verifyzkSNARKProof(
 {
     if (proof.proofData.size() < 96)
     {
-        Serial.println("❌ Invalid proof size");
+        _logErr.println("❌ Invalid proof size");
         return false;
     }
 
     if (proof.publicInputs != expectedPublicInputs)
     {
-        Serial.println("❌ Public inputs mismatch");
+        _logErr.println("❌ Public inputs mismatch");
         return false;
     }
 
     // In real zkSNARK, verify pairing equation: e(A, B) = e(C, D)
     // Here we just verify proof integrity
 
-    Serial.println("✅ zkSNARK proof verified");
+    _logInfo.println("✅ zkSNARK proof verified");
     return true;
 }
 
@@ -2190,7 +2230,7 @@ bool Infratic::createTimestampedProof(
     if (outBlockhash.isEmpty())
     {
         outBlockhash = "NO_BLOCKHASH"; // Store "NO_BLOCKHASH" consistently
-        Serial.println("⚠️  Using local timestamp only");
+        _logErr.println("⚠️  Using local timestamp only");
     }
 
     String combined = data + String(outTimestamp) + outBlockhash;
@@ -2212,10 +2252,10 @@ bool Infratic::createTimestampedProof(
 
     outProof = String(hexStr);
 
-    Serial.println("✅ Timestamped proof created");
-    Serial.printf("   Timestamp: %llu\n", outTimestamp);
-    Serial.println("   Blockhash: " + outBlockhash.substring(0, 16) + "...");
-    Serial.println("   Proof: " + outProof.substring(0, 16) + "...");
+    _logInfo.println("✅ Timestamped proof created");
+    _logInfo.printf("   Timestamp: %llu\n", outTimestamp);
+    _logInfo.println("   Blockhash: " + outBlockhash.substring(0, 16) + "...");
+    _logInfo.println("   Proof: " + outProof.substring(0, 16) + "...");
 
     return true;
 }
@@ -2257,15 +2297,15 @@ bool Infratic::verifyTimestampedProof(
 
     if (verified)
     {
-        Serial.println("✅ Timestamped proof verified");
-        Serial.printf("   Timestamp: %llu\n", timestamp);
-        Serial.println("   Blockhash: " + blockhash.substring(0, 16) + "...");
+        _logInfo.println("✅ Timestamped proof verified");
+        _logInfo.printf("   Timestamp: %llu\n", timestamp);
+        _logInfo.println("   Blockhash: " + blockhash.substring(0, 16) + "...");
     }
     else
     {
-        Serial.println("❌ Proof verification failed");
-        Serial.printf("   Expected: %s\n", proof.c_str());
-        Serial.printf("   Got:      %s\n", hexStr);
+        _logErr.println("❌ Proof verification failed");
+        _logInfo.printf("   Expected: %s\n", proof.c_str());
+        _logInfo.printf("   Got:      %s\n", hexStr);
     }
 
     return verified;
@@ -2304,7 +2344,7 @@ bool Infratic::createBatchCommitments(
         }
     }
 
-    Serial.printf("✅ Created %d batch commitments\n", outCommitments.size());
+    _logInfo.printf("✅ Created %d batch commitments\n", outCommitments.size());
     return !outCommitments.empty();
 }
 
@@ -2360,21 +2400,21 @@ bool Infratic::initializeZKStorage(
     String &outPDA,
     String &outTxSignature)
 {
-    Serial.println("\n=== Initialize ZK Storage in Anchor ===");
+    _logInfo.println("\n=== Initialize ZK Storage in Anchor ===");
 
     // 1. Decode private key
     uint8_t privateKey[128];
     size_t privLen = sizeof(privateKey);
     if (!base58Decode(privateKeyBase58, privateKey, privLen) || privLen < 64)
     {
-        Serial.println("❌ Private key decode failed");
+        _logErr.println("❌ Private key decode failed");
         return false;
     }
 
     // 2. Derive PDA
     std::vector<uint8_t> authorityBytes = base58ToPubkey(authorityPubkey);
     if (authorityBytes.size() != 32) {
-        Serial.println("❌ Authority pubkey decode failed");
+        _logErr.println("❌ Authority pubkey decode failed");
         return false;
     }
 
@@ -2386,30 +2426,30 @@ bool Infratic::initializeZKStorage(
     uint8_t bump;
     if (!derivePDA(seeds, programId, outPDA, bump))
     {
-        Serial.println("❌ PDA derivation failed");
+        _logErr.println("❌ PDA derivation failed");
         return false;
     }
 
-    Serial.println("✅ PDA derived: " + outPDA);
-    Serial.printf("   Bump: %d\n", bump);
+    _logInfo.println("✅ PDA derived: " + outPDA);
+    _logInfo.printf("   Bump: %d\n", bump);
 
     // 3. CHECK IF ACCOUNT ALREADY EXISTS
-    Serial.println("\n📋 Checking if account already exists...");
+    _logInfo.println("\n📋 Checking if account already exists...");
     
     uint64_t accountBalance = 0;
     if (getSolBalance(outPDA, accountBalance)) {
         // Account exists
         if (accountBalance > 0) {
-            Serial.println("⚠️  Account already initialized");
-            Serial.printf("   Balance: %llu lamports\n", accountBalance);
-            Serial.println("✅ Skipping initialization (account found)\n");
+            _logErr.println("⚠️  Account already initialized");
+            _logInfo.printf("   Balance: %llu lamports\n", accountBalance);
+            _logInfo.println("✅ Skipping initialization (account found)\n");
             outTxSignature = "EXISTING_ACCOUNT";
             return true;  // ← Return success, account already exists
         }
     }
 
     // 4. Account doesn't exist, create it
-    Serial.println("📝 Account not found, creating new one...\n");
+    _logInfo.println("📝 Account not found, creating new one...\n");
 
     Keypair signer = Keypair::fromPrivateKey(privateKey);
     Pubkey authority = Pubkey::fromBase58(authorityPubkey);
@@ -2451,11 +2491,11 @@ bool Infratic::initializeZKStorage(
     String txBase64 = tx.serializeBase64();
     if (!sendRawTransaction(txBase64, outTxSignature))
     {
-        Serial.println("❌ Transaction failed");
+        _logErr.println("❌ Transaction failed");
         return false;
     }
 
-    Serial.println("✅ Storage initialized: " + outTxSignature);
+    _logInfo.println("✅ Storage initialized: " + outTxSignature);
     return confirmTransaction(outTxSignature, 5000);
 }
 
@@ -2468,7 +2508,7 @@ bool Infratic::storeCommitmentInAnchor(
     const String &metadata,
     String &outTxSignature)
 {
-    Serial.println("\n=== Store Commitment in Anchor ===");
+    _logInfo.println("\n=== Store Commitment in Anchor ===");
 
     // Decode private key
     uint8_t privateKey[128];
@@ -2543,7 +2583,7 @@ bool Infratic::storeCommitmentInAnchor(
         return false;
     }
 
-    Serial.println("✅ Commitment stored in Anchor: " + outTxSignature);
+    _logInfo.println("✅ Commitment stored in Anchor: " + outTxSignature);
     return confirmTransaction(outTxSignature, 5000);
 }
 bool Infratic::updateCommitmentInAnchor(
@@ -2556,7 +2596,7 @@ bool Infratic::updateCommitmentInAnchor(
     String &outTxSignature)
 {
     // Similar to storeCommitmentInAnchor but uses "update_commitment" discriminator
-    Serial.println("\n=== Update Commitment in Anchor ===");
+    _logInfo.println("\n=== Update Commitment in Anchor ===");
 
     uint8_t privateKey[128];
     size_t privLen = sizeof(privateKey);
@@ -2628,7 +2668,7 @@ bool Infratic::updateCommitmentInAnchor(
         return false;
     }
 
-    Serial.println("✅ Commitment updated: " + outTxSignature);
+    _logInfo.println("✅ Commitment updated: " + outTxSignature);
     return confirmTransaction(outTxSignature, 5000);
 }
 
@@ -2642,7 +2682,7 @@ bool Infratic::storeMerkleRootInAnchor(
     const String &metadata,
     String &outTxSignature)
 {
-    Serial.println("\n=== Store Merkle Root in Anchor ===");
+    _logInfo.println("\n=== Store Merkle Root in Anchor ===");
 
     uint8_t privateKey[128];
     size_t privLen = sizeof(privateKey);
@@ -2715,7 +2755,7 @@ bool Infratic::storeMerkleRootInAnchor(
         return false;
     }
 
-    Serial.println("✅ Merkle root stored: " + outTxSignature);
+    _logInfo.println("✅ Merkle root stored: " + outTxSignature);
     return confirmTransaction(outTxSignature, 5000);
 }
 
@@ -2729,7 +2769,7 @@ bool Infratic::storeBatchInAnchor(
     const String &metadata,
     String &outTxSignature)
 {
-    Serial.println("\n=== Store Batch in Anchor ===");
+    _logInfo.println("\n=== Store Batch in Anchor ===");
 
     uint8_t privateKey[128];
     size_t privLen = sizeof(privateKey);
@@ -2806,7 +2846,7 @@ bool Infratic::storeBatchInAnchor(
         return false;
     }
 
-    Serial.println("✅ Batch stored: " + outTxSignature);
+    _logInfo.println("✅ Batch stored: " + outTxSignature);
     return confirmTransaction(outTxSignature, 5000);
 }
 
@@ -2817,7 +2857,7 @@ bool Infratic::storeBatchInAnchor(
 
 void Infratic::setEscrowProgramId(const String &programId) {
     _escrowProgramId = programId;
-    Serial.println("✅ Escrow Program ID set: " + _escrowProgramId);
+    _logInfo.println("✅ Escrow Program ID set: " + _escrowProgramId);
 }
 
 // ============================================================================
@@ -2874,7 +2914,7 @@ bool Infratic::getAccountInfo(const String &accountBase58, String &outBase64Data
     HTTPClient http;
 
     if (!http.begin(client, _rpcUrl)) {
-        Serial.println("❌ getAccountInfo: HTTP begin failed");
+        _logErr.println("❌ getAccountInfo: HTTP begin failed");
         return false;
     }
 
@@ -2887,7 +2927,7 @@ bool Infratic::getAccountInfo(const String &accountBase58, String &outBase64Data
     int code = http.POST(body);
 
     if (code != 200) {
-        Serial.printf("❌ getAccountInfo: HTTP code %d\n", code);
+        _logErr.printf("❌ getAccountInfo: HTTP code %d\n", code);
         http.end();
         return false;
     }
@@ -2897,13 +2937,13 @@ bool Infratic::getAccountInfo(const String &accountBase58, String &outBase64Data
 
     DynamicJsonDocument doc(4096); // data can be large
     if (deserializeJson(doc, response) || doc["error"]) {
-        Serial.println("❌ getAccountInfo: RPC error or JSON parse error");
+        _logErr.println("❌ getAccountInfo: RPC error or JSON parse error");
         return false;
     }
 
     JsonVariant data = doc["result"]["value"]["data"][0];
     if (data.isNull() || !data.is<String>()) {
-        Serial.println("❌ getAccountInfo: Account not found or data is null");
+        _logErr.println("❌ getAccountInfo: Account not found or data is null");
         return false;
     }
 
@@ -2917,10 +2957,10 @@ bool Infratic::getAccountInfo(const String &accountBase58, String &outBase64Data
  * @param commitment "finalized" (default) or "confirmed" (faster).
  */
 EscrowAccountResult Infratic::getEscrowAccount(const String &escrowPdaBase58, const String &commitment) {
-    Serial.println("\n=== Get Escrow Account Info ===");
+    _logInfo.println("\n=== Get Escrow Account Info ===");
     
     if (_escrowProgramId.isEmpty()) {
-        Serial.println("❌ Error: Escrow Program ID is not set.");
+        _logErr.println("❌ Error: Escrow Program ID is not set.");
         return {false, {}, "Program ID not set"};
     }
 
@@ -2942,7 +2982,7 @@ EscrowAccountResult Infratic::getEscrowAccount(const String &escrowPdaBase58, co
                                     (const unsigned char*)base64Data.c_str(), dataLen);
 
     if (ret != 0) {
-        Serial.println("❌ Base64 decode error");
+        _logErr.println("❌ Base64 decode error");
         return {false, {}, "Base64 decode error"};
     }
     
@@ -2954,9 +2994,9 @@ EscrowAccountResult Infratic::getEscrowAccount(const String &escrowPdaBase58, co
         return {false, {}, "Failed to decode account data (deserialize fail)"};
     }
 
-    Serial.println("✅ Escrow account read successfully");
-    Serial.println("   Buyer: " + account.buyer);
-    Serial.println("   Status: " + String((int)account.status));
+    _logInfo.println("✅ Escrow account read successfully");
+    _logInfo.println("   Buyer: " + account.buyer);
+    _logInfo.println("   Status: " + String((int)account.status));
 
     return {true, account, ""};
 }
@@ -2972,7 +3012,7 @@ bool Infratic::deserializeEscrowAccount(const std::vector<uint8_t> &data, Escrow
     const size_t ESCROW_ACCOUNT_DATA_SIZE = 288;
 
     if (data.size() < ANCHOR_DISCRIMINATOR_SIZE + ESCROW_ACCOUNT_DATA_SIZE) {
-        Serial.printf("❌ Deserialize Error: data too short (expected: %d, got: %d)\n",
+        _logErr.printf("❌ Deserialize Error: data too short (expected: %d, got: %d)\n",
             ANCHOR_DISCRIMINATOR_SIZE + ESCROW_ACCOUNT_DATA_SIZE, data.size());
         return false;
     }
@@ -3044,10 +3084,10 @@ EscrowCreateResult Infratic::escrow_create(
     const String &order_id,
     int64_t expiration_duration
 ) {
-    Serial.println("\n=== 1. Create Escrow (FIXED) ===");
+    _logInfo.println("\n=== 1. Create Escrow (FIXED) ===");
 
     if (_escrowProgramId.isEmpty()) {
-        Serial.println("❌ Error: Escrow Program ID is not set.");
+        _logErr.println("❌ Error: Escrow Program ID is not set.");
         return {false, "", "", 0, "Program ID not set"};
     }
 
@@ -3055,7 +3095,7 @@ EscrowCreateResult Infratic::escrow_create(
     uint8_t privateKey[128];
     size_t privLen = sizeof(privateKey);
     if (!base58Decode(buyerPrivateKeyBase58, privateKey, privLen) || privLen < 64) {
-        Serial.println("❌ Failed to decode buyer private key");
+        _logErr.println("❌ Failed to decode buyer private key");
         return {false, "", "", 0, "Invalid buyer private key"};
     }
     
@@ -3074,13 +3114,13 @@ EscrowCreateResult Infratic::escrow_create(
     String pdaAddress;
     uint8_t bump;
     if (!derivePDA(seeds, _escrowProgramId, pdaAddress, bump)) {
-        Serial.println("❌ Failed to derive escrow PDA address");
+        _logErr.println("❌ Failed to derive escrow PDA address");
         return {false, "", "", 0, "PDA derivation failed"};
     }
     
     Pubkey escrowPda = Pubkey::fromBase58(pdaAddress);
-    Serial.println("✅ PDA derived: " + pdaAddress);
-    Serial.printf("   Bump: %d\n", bump);
+    _logInfo.println("✅ PDA derived: " + pdaAddress);
+    _logInfo.printf("   Bump: %d\n", bump);
 
     // 3. Account size and rent
     // Escrow struct size: 8 (discriminator) + 292 (data) = 300 bytes
@@ -3090,9 +3130,9 @@ EscrowCreateResult Infratic::escrow_create(
     // Approx: 19.055441478 lamports/byte * 300 bytes = ~5,716,632 lamports
     const uint64_t RENT_LAMPORTS = 5800000; // ~0.0058 SOL (with safety margin)
     
-    Serial.printf("💰 Rent: %llu lamports\n", RENT_LAMPORTS);
-    Serial.printf("💰 Transfer amount: %llu lamports\n", amount);
-    Serial.printf("💰 TOTAL: %llu lamports\n", RENT_LAMPORTS + amount);
+    _logInfo.printf("💰 Rent: %llu lamports\n", RENT_LAMPORTS);
+    _logInfo.printf("💰 Transfer amount: %llu lamports\n", amount);
+    _logInfo.printf("💰 TOTAL: %llu lamports\n", RENT_LAMPORTS + amount);
 
     // 4. Check that the buyer has enough balance
     uint64_t buyerBalance = 0;
@@ -3102,7 +3142,7 @@ EscrowCreateResult Infratic::escrow_create(
     
     uint64_t totalRequired = RENT_LAMPORTS + amount;
     if (buyerBalance < totalRequired) {
-        Serial.printf("❌ Insufficient balance! Required: %llu, Available: %llu\n",
+        _logErr.printf("❌ Insufficient balance! Required: %llu, Available: %llu\n",
                      totalRequired, buyerBalance);
         return {false, pdaAddress, "", bump, "Insufficient buyer balance"};
     }
@@ -3124,7 +3164,7 @@ EscrowCreateResult Infratic::escrow_create(
     // bump (u8)
     instructionData.push_back(bump);
 
-    Serial.printf("📦 Instruction size: %d bytes\n", instructionData.size());
+    _logInfo.printf("📦 Instruction size: %d bytes\n", instructionData.size());
 
     // 6. Account order must match the program
     // Order in the Rust program: escrow, buyer, seller, system_program
@@ -3154,22 +3194,22 @@ EscrowCreateResult Infratic::escrow_create(
     String txSignature;
     String txBase64 = tx.serializeBase64();
     
-    Serial.println("📤 Sending transaction...");
+    _logInfo.println("📤 Sending transaction...");
     
     if (!sendRawTransaction(txBase64, txSignature)) {
-        Serial.println("❌ Failed to send escrow create transaction");
+        _logErr.println("❌ Failed to send escrow create transaction");
         return {false, pdaAddress, "", bump, "sendRawTransaction failed"};
     }
 
-    Serial.println("✅ Escrow create transaction sent: " + txSignature);
+    _logInfo.println("✅ Escrow create transaction sent: " + txSignature);
     
     // 8. Transaction confirmation
     if (!confirmTransaction(txSignature, 15000)) { // wait 15 seconds
-        Serial.println("⚠️  Transaction not confirmed (timeout)");
+        _logErr.println("⚠️  Transaction not confirmed (timeout)");
         return {true, pdaAddress, txSignature, bump, "Transaction sent but not confirmed"};
     }
     
-    Serial.println("✅ Escrow created successfully!");
+    _logInfo.println("✅ Escrow created successfully!");
     return {true, pdaAddress, txSignature, bump, ""};
 }
 
@@ -3184,10 +3224,10 @@ EscrowTxResult Infratic::escrow_confirmDelivery(
     const String &escrowPdaBase58,
     const String &proof_hash
 ) {
-    Serial.println("\n=== 2. Confirm Delivery (FIXED) ===");
+    _logInfo.println("\n=== 2. Confirm Delivery (FIXED) ===");
     
     if (_escrowProgramId.isEmpty()) {
-        Serial.println("❌ Error: Escrow Program ID is not set.");
+        _logErr.println("❌ Error: Escrow Program ID is not set.");
         return {false, "", "Program ID not set"};
     }
 
@@ -3204,21 +3244,21 @@ EscrowTxResult Infratic::escrow_confirmDelivery(
     Pubkey program = Pubkey::fromBase58(_escrowProgramId);
 
     // 2. Check the escrow state first
-    Serial.println("📋 Checking escrow state...");
+    _logInfo.println("📋 Checking escrow state...");
     EscrowAccountResult accountCheck = getEscrowAccount(escrowPdaBase58, "confirmed");
     
     if (!accountCheck.success) {
-        Serial.println("❌ Could not read escrow account!");
+        _logErr.println("❌ Could not read escrow account!");
         return {false, "", "Failed to read escrow account"};
     }
     
     if (accountCheck.account.status != EscrowStatus::Active) {
-        Serial.println("❌ Escrow is not active!");
+        _logErr.println("❌ Escrow is not active!");
         return {false, "", "Escrow is not active"};
     }
     
     if (accountCheck.account.seller != sellerPubkeyBase58) {
-        Serial.println("❌ Unauthorized! You are not the seller.");
+        _logErr.println("❌ Unauthorized! You are not the seller.");
         return {false, "", "Unauthorized: not the seller"};
     }
 
@@ -3226,7 +3266,7 @@ EscrowTxResult Infratic::escrow_confirmDelivery(
     std::vector<uint8_t> instructionData = calculateDiscriminator("confirm_delivery");
     serializeAnchorString(instructionData, proof_hash);
 
-    Serial.printf("📦 Instruction size: %d bytes\n", instructionData.size());
+    _logInfo.printf("📦 Instruction size: %d bytes\n", instructionData.size());
 
     // 4. Build instruction (Rust order: escrow, seller)
     Instruction ix(
@@ -3251,19 +3291,19 @@ EscrowTxResult Infratic::escrow_confirmDelivery(
     String txSignature;
     String txBase64 = tx.serializeBase64();
     
-    Serial.println("📤 Sending transaction...");
+    _logInfo.println("📤 Sending transaction...");
     
     if (!sendRawTransaction(txBase64, txSignature)) {
         return {false, "", "sendRawTransaction failed"};
     }
 
-    Serial.println("✅ Delivery confirmation sent: " + txSignature);
+    _logInfo.println("✅ Delivery confirmation sent: " + txSignature);
     
     if (!confirmTransaction(txSignature, 15000)) {
         return {true, txSignature, "Transaction sent but not confirmed"};
     }
     
-    Serial.println("✅ Delivery confirmed successfully!");
+    _logInfo.println("✅ Delivery confirmed successfully!");
     return {true, txSignature, ""};
 }
 
@@ -3278,10 +3318,10 @@ EscrowTxResult Infratic::escrow_release(
     const String &sellerPubkeyBase58,
     const String &escrowPdaBase58
 ) {
-    Serial.println("\n=== 3. Release Escrow (FIXED) ===");
+    _logInfo.println("\n=== 3. Release Escrow (FIXED) ===");
     
     if (_escrowProgramId.isEmpty()) {
-        Serial.println("❌ Error: Escrow Program ID is not set.");
+        _logErr.println("❌ Error: Escrow Program ID is not set.");
         return {false, "", "Program ID not set"};
     }
 
@@ -3299,26 +3339,26 @@ EscrowTxResult Infratic::escrow_release(
     Pubkey program = Pubkey::fromBase58(_escrowProgramId);
 
     // 2. Check the escrow state
-    Serial.println("📋 Checking escrow state...");
+    _logInfo.println("📋 Checking escrow state...");
     EscrowAccountResult accountCheck = getEscrowAccount(escrowPdaBase58, "confirmed");
     
     if (!accountCheck.success) {
-        Serial.println("❌ Could not read escrow account!");
+        _logErr.println("❌ Could not read escrow account!");
         return {false, "", "Failed to read escrow account"};
     }
     
     if (accountCheck.account.status != EscrowStatus::Active) {
-        Serial.println("❌ Escrow is not active!");
+        _logErr.println("❌ Escrow is not active!");
         return {false, "", "Escrow is not active"};
     }
     
     if (accountCheck.account.buyer != buyerPubkeyBase58) {
-        Serial.println("❌ Unauthorized! You are not the buyer.");
+        _logErr.println("❌ Unauthorized! You are not the buyer.");
         return {false, "", "Unauthorized: not the buyer"};
     }
     
     if (!accountCheck.account.deliveryConfirmed) {
-        Serial.println("⚠️  Warning: delivery is not confirmed yet!");
+        _logErr.println("⚠️  Warning: delivery is not confirmed yet!");
         // You can return here if you want
     }
 
@@ -3349,19 +3389,19 @@ EscrowTxResult Infratic::escrow_release(
     String txSignature;
     String txBase64 = tx.serializeBase64();
     
-    Serial.println("📤 Sending transaction...");
+    _logInfo.println("📤 Sending transaction...");
     
     if (!sendRawTransaction(txBase64, txSignature)) {
         return {false, "", "sendRawTransaction failed"};
     }
 
-    Serial.println("✅ Escrow released: " + txSignature);
+    _logInfo.println("✅ Escrow released: " + txSignature);
     
     if (!confirmTransaction(txSignature, 15000)) {
         return {true, txSignature, "Transaction sent but not confirmed"};
     }
     
-    Serial.println("✅ Payment transferred to the seller!");
+    _logInfo.println("✅ Payment transferred to the seller!");
     return {true, txSignature, ""};
 }
 
@@ -3375,10 +3415,10 @@ EscrowTxResult Infratic::escrow_cancel(
     const String &buyerPubkeyBase58,
     const String &escrowPdaBase58
 ) {
-    Serial.println("\n=== 4. Cancel Escrow (FIXED) ===");
+    _logInfo.println("\n=== 4. Cancel Escrow (FIXED) ===");
 
     if (_escrowProgramId.isEmpty()) {
-        Serial.println("❌ Error: Escrow Program ID is not set.");
+        _logErr.println("❌ Error: Escrow Program ID is not set.");
         return {false, "", "Program ID not set"};
     }
 
@@ -3395,29 +3435,29 @@ EscrowTxResult Infratic::escrow_cancel(
     Pubkey program = Pubkey::fromBase58(_escrowProgramId);
 
     // 2. Check the escrow state
-    Serial.println("📋 Checking escrow state...");
+    _logInfo.println("📋 Checking escrow state...");
     EscrowAccountResult accountCheck = getEscrowAccount(escrowPdaBase58, "confirmed");
     
     if (!accountCheck.success) {
-        Serial.println("❌ Could not read escrow account!");
+        _logErr.println("❌ Could not read escrow account!");
         return {false, "", "Failed to read escrow account"};
     }
     
     if (accountCheck.account.status != EscrowStatus::Active) {
-        Serial.println("❌ Escrow is not active!");
+        _logErr.println("❌ Escrow is not active!");
         return {false, "", "Escrow is not active"};
     }
     
     if (accountCheck.account.buyer != buyerPubkeyBase58) {
-        Serial.println("❌ Unauthorized! You are not the buyer.");
+        _logErr.println("❌ Unauthorized! You are not the buyer.");
         return {false, "", "Unauthorized: not the buyer"};
     }
     
     // 3. Expiration check
     int64_t currentTime = millis() / 1000; // Unix timestamp (seconds)
     if (currentTime < accountCheck.account.expiresAt) {
-        Serial.println("❌ Escrow has not expired yet!");
-        Serial.printf("   Time left: %lld seconds\n",
+        _logErr.println("❌ Escrow has not expired yet!");
+        _logInfo.printf("   Time left: %lld seconds\n",
                      accountCheck.account.expiresAt - currentTime);
         return {false, "", "Escrow has not expired yet"};
     }
@@ -3448,19 +3488,19 @@ EscrowTxResult Infratic::escrow_cancel(
     String txSignature;
     String txBase64 = tx.serializeBase64();
     
-    Serial.println("📤 Sending transaction...");
+    _logInfo.println("📤 Sending transaction...");
     
     if (!sendRawTransaction(txBase64, txSignature)) {
         return {false, "", "sendRawTransaction failed"};
     }
 
-    Serial.println("✅ Escrow cancelled: " + txSignature);
+    _logInfo.println("✅ Escrow cancelled: " + txSignature);
     
     if (!confirmTransaction(txSignature, 15000)) {
         return {true, txSignature, "Transaction sent but not confirmed"};
     }
     
-    Serial.println("✅ Funds refunded to the buyer!");
+    _logInfo.println("✅ Funds refunded to the buyer!");
     return {true, txSignature, ""};
 }
 
@@ -3476,10 +3516,10 @@ EscrowTxResult Infratic::escrow_initiateDispute(
     const String &reason,
     const String &evidence
 ) {
-    Serial.println("\n=== 5. Initiate Dispute (FIXED) ===");
+    _logInfo.println("\n=== 5. Initiate Dispute (FIXED) ===");
 
     if (_escrowProgramId.isEmpty()) {
-        Serial.println("❌ Error: Escrow Program ID is not set.");
+        _logErr.println("❌ Error: Escrow Program ID is not set.");
         return {false, "", "Program ID not set"};
     }
 
@@ -3496,21 +3536,21 @@ EscrowTxResult Infratic::escrow_initiateDispute(
     Pubkey program = Pubkey::fromBase58(_escrowProgramId);
 
     // 2. Check the escrow state
-    Serial.println("📋 Checking escrow state...");
+    _logInfo.println("📋 Checking escrow state...");
     EscrowAccountResult accountCheck = getEscrowAccount(escrowPdaBase58, "confirmed");
     
     if (!accountCheck.success) {
-        Serial.println("❌ Could not read escrow account!");
+        _logErr.println("❌ Could not read escrow account!");
         return {false, "", "Failed to read escrow account"};
     }
     
     if (accountCheck.account.status != EscrowStatus::Active) {
-        Serial.println("❌ Escrow is not active!");
+        _logErr.println("❌ Escrow is not active!");
         return {false, "", "Escrow is not active"};
     }
     
     if (accountCheck.account.seller != sellerPubkeyBase58) {
-        Serial.println("❌ Unauthorized! You are not the seller.");
+        _logErr.println("❌ Unauthorized! You are not the seller.");
         return {false, "", "Unauthorized: not the seller"};
     }
 
@@ -3519,7 +3559,7 @@ EscrowTxResult Infratic::escrow_initiateDispute(
     serializeAnchorString(instructionData, reason);
     serializeAnchorString(instructionData, evidence);
 
-    Serial.printf("📦 Instruction size: %d bytes\n", instructionData.size());
+    _logInfo.printf("📦 Instruction size: %d bytes\n", instructionData.size());
 
     // 4. Build instruction (Rust order: escrow, seller)
     Instruction ix(
@@ -3544,19 +3584,19 @@ EscrowTxResult Infratic::escrow_initiateDispute(
     String txSignature;
     String txBase64 = tx.serializeBase64();
     
-    Serial.println("📤 Sending transaction...");
+    _logInfo.println("📤 Sending transaction...");
     
     if (!sendRawTransaction(txBase64, txSignature)) {
         return {false, "", "sendRawTransaction failed"};
     }
 
-    Serial.println("✅ Dispute initiated: " + txSignature);
+    _logInfo.println("✅ Dispute initiated: " + txSignature);
     
     if (!confirmTransaction(txSignature, 15000)) {
         return {true, txSignature, "Transaction sent but not confirmed"};
     }
     
-    Serial.println("✅ Dispute recorded!");
+    _logInfo.println("✅ Dispute recorded!");
     return {true, txSignature, ""};
 }
 
@@ -3571,10 +3611,10 @@ EscrowTxResult Infratic::escrow_forceClose(
     const String &buyerPubkeyBase58,
     const String &escrowPdaBase58
 ) {
-    Serial.println("\n=== 6. Force Close Escrow (FIXED) ===");
+    _logInfo.println("\n=== 6. Force Close Escrow (FIXED) ===");
     
     if (_escrowProgramId.isEmpty()) {
-        Serial.println("❌ Error: Escrow Program ID is not set.");
+        _logErr.println("❌ Error: Escrow Program ID is not set.");
         return {false, "", "Program ID not set"};
     }
 
@@ -3618,18 +3658,18 @@ EscrowTxResult Infratic::escrow_forceClose(
     String txSignature;
     String txBase64 = tx.serializeBase64();
     
-    Serial.println("📤 Sending transaction...");
+    _logInfo.println("📤 Sending transaction...");
     
     if (!sendRawTransaction(txBase64, txSignature)) {
         return {false, "", "sendRawTransaction failed"};
     }
 
-    Serial.println("✅ Escrow force closed: " + txSignature);
+    _logInfo.println("✅ Escrow force closed: " + txSignature);
     
     if (!confirmTransaction(txSignature, 15000)) {
         return {true, txSignature, "Transaction sent but not confirmed"};
     }
     
-    Serial.println("🚨 Emergency! Escrow closed, funds refunded to the buyer.");
+    _logInfo.println("🚨 Emergency! Escrow closed, funds refunded to the buyer.");
     return {true, txSignature, ""};
 }

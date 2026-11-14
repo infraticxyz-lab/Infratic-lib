@@ -13,6 +13,16 @@
 
 #include "base58.h"
 
+#define INFRATIC_VERSION "1.1.0"
+
+/** Log levels for Infratic::setLogLevel() */
+enum InfraticLogLevel : uint8_t
+{
+    INFRATIC_LOG_NONE = 0,  // no Serial output
+    INFRATIC_LOG_ERROR = 1, // only errors and warnings
+    INFRATIC_LOG_INFO = 2   // everything (default)
+};
+
 // ============================================================================
 // ENCODING HELPERS
 // ============================================================================
@@ -224,6 +234,9 @@ class Infratic
 {
 public:
     explicit Infratic(const String &rpcUrl);
+
+    /** @brief Sets library Serial output level (default INFRATIC_LOG_INFO) */
+    static void setLogLevel(uint8_t level);
 
     // ========================================================================
     // BLOCKCHAIN QUERIES
