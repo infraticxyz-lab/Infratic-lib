@@ -781,6 +781,256 @@ bool Infratic::confirmTransaction(const String &signature, uint32_t maxWaitMs)
 }
 
 // ============================================================================
+// GENERIC RPC
+// ============================================================================
+
+static bool fromBase64(const char *in, std::vector<uint8_t> &out)
+{
+    size_t inLen = strlen(in);
+    size_t outLen = 0;
+    out.assign((inLen / 4) * 3 + 3, 0);
+    if (mbedtls_base64_decode(out.data(), out.size(), &outLen, (const unsigned char *)in, inLen) != 0)
+    {
+        out.clear();
+        return false;
+    }
+    out.resize(outLen);
+    return true;
+}
+
+static size_t jsonCapacity(const String &response)
+{
+    // input strings are copied into the document, keep some room for nodes
+    return response.length() + response.length() / 2 + 1024;
+}
+
+AccountFilter AccountFilter::dataSize(size_t size)
+{
+    AccountFilter f;
+    f.size = size;
+    return f;
+}
+
+AccountFilter AccountFilter::memcmp(size_t offset, const std::vector<uint8_t> &bytes)
+{
+    AccountFilter f;
+    f.isMemcmp = true;
+    f.offset = offset;
+    f.bytes = bytes;
+    return f;
+}
+
+bool Infratic::rpcCall(const String &method, const String &paramsJson, String &outResponse)
+{
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+
+    if (!http.begin(client, _rpcUrl))
+    {
+        Serial.println("❌ " + method + ": HTTP begin failed");
+        return false;
+    }
+
+    http.addHeader("Content-Type", "application/json");
+    String body = String(R"({"jsonrpc":"2.0","id":1,"method":")") + method + R"(","params":)" + paramsJson + "}";
+
+    int code = http.POST(body);
+    if (code != 200)
+    {
+        Serial.printf("❌ %s: HTTP code %d\n", method.c_str(), code);
+        http.end();
+        return false;
+    }
+
+    outResponse = http.getString();
+    http.end();
+
+    StaticJsonDocument<32> filter;
+    filter["error"] = true;
+    DynamicJsonDocument err(512);
+    if (deserializeJson(err, outResponse, DeserializationOption::Filter(filter)))
+    {
+        Serial.println("❌ " + method + ": JSON parse error");
+        return false;
+    }
+    if (!err["error"].isNull())
+    {
+        Serial.println("❌ " + method + " RPC error: " + err["error"]["message"].as<String>());
+        return false;
+    }
+    return true;
+}
+
+bool Infratic::getAccountData(const String &accountBase58, std::vector<uint8_t> &outData,
+                              const String &commitment, String *outOwner)
+{
+    String response;
+    String params = "[\"" + accountBase58 + R"(",{"encoding":"base64","commitment":")" + commitment + "\"}]";
+    if (!rpcCall("getAccountInfo", params, response))
+    {
+        return false;
+    }
+
+    DynamicJsonDocument doc(jsonCapacity(response));
+    if (deserializeJson(doc, response))
+    {
+        Serial.println("❌ getAccountInfo: JSON parse error");
+        return false;
+    }
+
+    JsonVariant value = doc["result"]["value"];
+    const char *data = value["data"][0];
+    if (value.isNull() || !data)
+    {
+        Serial.println("❌ getAccountInfo: account not found " + accountBase58);
+        return false;
+    }
+
+    if (outOwner)
+    {
+        *outOwner = value["owner"] | "";
+    }
+    return fromBase64(data, outData);
+}
+
+bool Infratic::getProgramAccounts(const String &programIdBase58, const std::vector<AccountFilter> &filters,
+                                  std::vector<ProgramAccount> &outAccounts, const String &commitment)
+{
+    String params = "[\"" + programIdBase58 + R"(",{"encoding":"base64","commitment":")" + commitment + "\"";
+    if (!filters.empty())
+    {
+        params += ",\"filters\":[";
+        for (size_t i = 0; i < filters.size(); i++)
+        {
+            const AccountFilter &f = filters[i];
+            if (i) params += ",";
+            if (f.isMemcmp)
+            {
+                params += R"({"memcmp":{"offset":)" + String((unsigned long)f.offset) + R"(,"bytes":")" +
+                          base58Encode(f.bytes.data(), f.bytes.size()) + "\"}}";
+            }
+            else
+            {
+                params += R"({"dataSize":)" + String((unsigned long)f.size) + "}";
+            }
+        }
+        params += "]";
+    }
+    params += "}]";
+
+    String response;
+    if (!rpcCall("getProgramAccounts", params, response))
+    {
+        return false;
+    }
+
+    DynamicJsonDocument doc(jsonCapacity(response));
+    if (deserializeJson(doc, response))
+    {
+        Serial.println("❌ getProgramAccounts: JSON parse error (response too big? add filters)");
+        return false;
+    }
+
+    outAccounts.clear();
+    for (JsonObject item : doc["result"].as<JsonArray>())
+    {
+        ProgramAccount acc;
+        acc.pubkey = item["pubkey"] | "";
+        acc.lamports = item["account"]["lamports"] | 0ULL;
+        const char *data = item["account"]["data"][0];
+        if (data) fromBase64(data, acc.data);
+        outAccounts.push_back(acc);
+    }
+    return true;
+}
+
+bool Infratic::getSignaturesForAddress(const String &addressBase58, std::vector<SignatureInfo> &outSignatures,
+                                       uint8_t limit, const String &until)
+{
+    String params = "[\"" + addressBase58 + R"(",{"limit":)" + String((unsigned)limit);
+    if (!until.isEmpty())
+    {
+        params += R"(,"until":")" + until + "\"";
+    }
+    params += "}]";
+
+    String response;
+    if (!rpcCall("getSignaturesForAddress", params, response))
+    {
+        return false;
+    }
+
+    DynamicJsonDocument doc(jsonCapacity(response));
+    if (deserializeJson(doc, response))
+    {
+        Serial.println("❌ getSignaturesForAddress: JSON parse error");
+        return false;
+    }
+
+    outSignatures.clear();
+    for (JsonObject item : doc["result"].as<JsonArray>())
+    {
+        SignatureInfo info;
+        info.signature = item["signature"] | "";
+        info.slot = item["slot"] | 0ULL;
+        info.blockTime = item["blockTime"] | 0LL;
+        info.failed = !item["err"].isNull();
+        outSignatures.push_back(info);
+    }
+    return true;
+}
+
+bool Infratic::getMinimumBalanceForRentExemption(size_t dataLength, uint64_t &outLamports)
+{
+    String response;
+    if (!rpcCall("getMinimumBalanceForRentExemption", "[" + String((unsigned long)dataLength) + "]", response))
+    {
+        return false;
+    }
+
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, response) || !doc["result"].is<uint64_t>())
+    {
+        return false;
+    }
+    outLamports = doc["result"].as<uint64_t>();
+    return true;
+}
+
+bool Infratic::getClusterTime(int64_t &outUnixTime)
+{
+    String response;
+    if (!rpcCall("getSlot", R"([{"commitment":"confirmed"}])", response))
+    {
+        return false;
+    }
+
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, response))
+    {
+        return false;
+    }
+    uint64_t slot = doc["result"] | 0ULL;
+
+    // the newest slot may not have a block time yet, step back a few slots
+    for (int i = 0; i < 4 && slot > (uint64_t)i; i++)
+    {
+        if (!rpcCall("getBlockTime", "[" + String((unsigned long long)(slot - i)) + "]", response))
+        {
+            continue;
+        }
+        doc.clear();
+        if (!deserializeJson(doc, response) && doc["result"].is<int64_t>())
+        {
+            outUnixTime = doc["result"].as<int64_t>();
+            return true;
+        }
+    }
+    return false;
+}
+
+// ============================================================================
 // CRYPTOGRAPHIC OPERATIONS
 // ============================================================================
 

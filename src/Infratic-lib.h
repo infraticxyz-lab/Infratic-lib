@@ -186,6 +186,37 @@ struct EscrowAccountResult
     String errorMessage;
 };
 // ============================================================================
+// RPC RESULT STRUCTURES
+// ============================================================================
+
+/** @brief getProgramAccounts filter (dataSize or memcmp) */
+struct AccountFilter
+{
+    bool isMemcmp = false;
+    size_t size = 0;            // dataSize filter
+    size_t offset = 0;          // memcmp offset
+    std::vector<uint8_t> bytes; // memcmp bytes
+
+    static AccountFilter dataSize(size_t size);
+    static AccountFilter memcmp(size_t offset, const std::vector<uint8_t> &bytes);
+};
+
+struct ProgramAccount
+{
+    String pubkey;
+    std::vector<uint8_t> data;
+    uint64_t lamports = 0;
+};
+
+struct SignatureInfo
+{
+    String signature;
+    uint64_t slot = 0;
+    int64_t blockTime = 0;
+    bool failed = false; // transaction had an error
+};
+
+// ============================================================================
 // MAIN LIBRARY CLASS
 // ============================================================================
 
@@ -303,6 +334,50 @@ public:
      * @return true if confirmed
      */
     bool confirmTransaction(const String &signature, uint32_t maxWaitMs = 5000);
+
+    // ========================================================================
+    // GENERIC RPC
+    // ========================================================================
+
+    /**
+     * @brief Sends any JSON-RPC request
+     * @param method RPC method name (e.g. "getSlot")
+     * @param paramsJson JSON array of params (e.g. "[\"<pubkey>\"]")
+     * @param outResponse Raw JSON response
+     * @return true on HTTP 200 and no RPC "error" field
+     */
+    bool rpcCall(const String &method, const String &paramsJson, String &outResponse);
+
+    /**
+     * @brief Reads raw account data (base64 decoded)
+     * @param accountBase58 Account address
+     * @param outData Account data bytes
+     * @param commitment "processed", "confirmed" or "finalized"
+     * @param outOwner Optional, receives the owner program
+     * @return false if the account does not exist
+     */
+    bool getAccountData(const String &accountBase58, std::vector<uint8_t> &outData,
+                        const String &commitment = "confirmed", String *outOwner = nullptr);
+
+    /**
+     * @brief Lists accounts owned by a program, with optional filters
+     * Use filters (dataSize / memcmp) to keep the response small on ESP32.
+     */
+    bool getProgramAccounts(const String &programIdBase58, const std::vector<AccountFilter> &filters,
+                            std::vector<ProgramAccount> &outAccounts, const String &commitment = "confirmed");
+
+    /**
+     * @brief Latest signatures for an address (newest first)
+     * @param until Optional, stop at this signature (exclusive)
+     */
+    bool getSignaturesForAddress(const String &addressBase58, std::vector<SignatureInfo> &outSignatures,
+                                 uint8_t limit = 10, const String &until = "");
+
+    /** @brief Rent-exempt minimum for an account of given size */
+    bool getMinimumBalanceForRentExemption(size_t dataLength, uint64_t &outLamports);
+
+    /** @brief Current cluster unix time (getSlot + getBlockTime) */
+    bool getClusterTime(int64_t &outUnixTime);
 
     // ========================================================================
     // CRYPTOGRAPHIC OPERATIONS
