@@ -1,5 +1,13 @@
 #include "Infratic-lib.h"
 #include <stdarg.h>
+#include <mbedtls/version.h>
+
+// mbedtls 3.x (arduino-esp32 3.x / ESP-IDF 5) removed the *_ret variants
+#if defined(MBEDTLS_VERSION_MAJOR) && MBEDTLS_VERSION_MAJOR >= 3
+#define mbedtls_sha256_starts_ret mbedtls_sha256_starts
+#define mbedtls_sha256_update_ret mbedtls_sha256_update
+#define mbedtls_sha256_finish_ret mbedtls_sha256_finish
+#endif
 
 // ============================================================================
 // LOGGING
