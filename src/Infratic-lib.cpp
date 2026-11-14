@@ -146,12 +146,67 @@ std::vector<uint8_t> encodeU64LE(uint64_t value)
     }
     return result;
 }
-std::vector<uint8_t> encodeI64LE(int64_t value) {
+std::vector<uint8_t> encodeU64BE(uint64_t value)
+{
     std::vector<uint8_t> result(8);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 8; i++)
+    {
+        result[7 - i] = (uint8_t)((value >> (8 * i)) & 0xFF);
+    }
+    return result;
+}
+
+std::vector<uint8_t> encodeU32LE(uint32_t value)
+{
+    std::vector<uint8_t> result(4);
+    for (int i = 0; i < 4; i++)
+    {
         result[i] = (uint8_t)((value >> (8 * i)) & 0xFF);
     }
     return result;
+}
+
+std::vector<uint8_t> encodeI64LE(int64_t value)
+{
+    return encodeU64LE((uint64_t)value);
+}
+
+void appendCompactU16(std::vector<uint8_t> &buffer, uint16_t value)
+{
+    uint16_t rem = value;
+    while (true)
+    {
+        uint8_t elem = rem & 0x7f;
+        rem >>= 7;
+        if (rem == 0)
+        {
+            buffer.push_back(elem);
+            break;
+        }
+        buffer.push_back(elem | 0x80);
+    }
+}
+
+void appendBorshString(std::vector<uint8_t> &buffer, const String &str)
+{
+    std::vector<uint8_t> len = encodeU32LE(str.length());
+    buffer.insert(buffer.end(), len.begin(), len.end());
+    buffer.insert(buffer.end(), str.begin(), str.end());
+}
+
+static String toBase64(const uint8_t *data, size_t len)
+{
+    size_t requiredSize = 4 * ((len + 2) / 3);
+    std::vector<unsigned char> outBuf(requiredSize + 1, 0);
+
+    size_t olen = 0;
+    int ret = mbedtls_base64_encode(outBuf.data(), outBuf.size(), &olen, data, len);
+    if (ret != 0)
+    {
+        Serial.println("❌ Base64 encoding error: " + String(ret));
+        return "";
+    }
+    return String((const char *)outBuf.data()).substring(0, olen);
 }
 
 std::vector<uint8_t> base58ToPubkey(const String &base58Str)
@@ -881,110 +936,46 @@ std::vector<uint8_t> Infratic::calculateDiscriminator(const std::string &functio
 
 String Infratic::base64Encode(const uint8_t *data, size_t len)
 {
-    size_t requiredSize = 4 * ((len + 2) / 3);
-    char *outBuf = new char[requiredSize + 1];
-    memset(outBuf, 0, requiredSize + 1);
-
-    size_t olen = 0;
-    int ret = mbedtls_base64_encode(reinterpret_cast<unsigned char *>(outBuf),
-                                    requiredSize + 1, &olen, data, len);
-    if (ret != 0)
-    {
-        Serial.println("❌ Base64 encoding error: " + String(ret));
-        delete[] outBuf;
-        return "";
-    }
-
-    String result = String(outBuf).substring(0, olen);
-    delete[] outBuf;
-    return result;
+    return toBase64(data, len);
 }
 
 // ============================================================================
 // INTERNAL TRANSACTION BUILDING
 // ============================================================================
 
+static const char *SYSTEM_PROGRAM_B58 = "11111111111111111111111111111111";
+
 bool Infratic::buildAndSignTransaction(const uint8_t *privateKey, size_t privLen,
                                        const uint8_t *fromPub, const uint8_t *toPub,
                                        uint64_t lamports, const String &recentBlockhash,
                                        String &outTxBase64)
 {
-    uint8_t numRequiredSignatures = 1;
-    uint8_t numReadOnlySigned = 0;
-    uint8_t numReadOnlyUnsigned = 1;
-
-    uint8_t recentBlockhashBytes[32];
-    size_t rbLen = sizeof(recentBlockhashBytes);
-    if (!base58Decode(recentBlockhash, recentBlockhashBytes, rbLen) || rbLen != 32)
-    {
-        Serial.println("❌ Blockhash decode failed");
-        return false;
-    }
-
-    uint8_t instructionData[12];
-    instructionData[0] = 0x02;
-    instructionData[1] = 0x00;
-    instructionData[2] = 0x00;
-    instructionData[3] = 0x00;
-    for (int i = 0; i < 8; i++)
-    {
-        instructionData[4 + i] = (uint8_t)((lamports >> (8 * i)) & 0xFF);
-    }
-
-    uint8_t message[512];
-    size_t offset = 0;
-
-    message[offset++] = numRequiredSignatures;
-    message[offset++] = numReadOnlySigned;
-    message[offset++] = numReadOnlyUnsigned;
-    message[offset++] = 3;
-
-    memcpy(&message[offset], fromPub, 32);
-    offset += 32;
-    memcpy(&message[offset], toPub, 32);
-    offset += 32;
-
-    uint8_t systemProgram[32];
-    size_t spLen = sizeof(systemProgram);
-    base58Decode("11111111111111111111111111111111", systemProgram, spLen);
-    memcpy(&message[offset], systemProgram, 32);
-    offset += 32;
-
-    memcpy(&message[offset], recentBlockhashBytes, 32);
-    offset += 32;
-
-    message[offset++] = 1;
-    message[offset++] = 2;
-    message[offset++] = 2;
-    message[offset++] = 0;
-    message[offset++] = 1;
-    message[offset++] = 12;
-    memcpy(&message[offset], instructionData, 12);
-    offset += 12;
-
-    size_t messageLen = offset;
-
     if (privLen < 64)
     {
         Serial.println("❌ Invalid private key length");
         return false;
     }
 
-    const uint8_t *privKeyOnly = privateKey;
-    const uint8_t *pubKeyFromPriv = privateKey + 32;
+    Pubkey from{std::vector<uint8_t>(fromPub, fromPub + 32)};
+    Pubkey to{std::vector<uint8_t>(toPub, toPub + 32)};
 
-    uint8_t signature[64];
-    Ed25519::sign(signature, privKeyOnly, pubKeyFromPriv, message, messageLen);
+    // System program transfer: u32 instruction index (2) + u64 lamports
+    std::vector<uint8_t> data = encodeU32LE(2);
+    std::vector<uint8_t> amount = encodeU64LE(lamports);
+    data.insert(data.end(), amount.begin(), amount.end());
 
-    uint8_t finalTx[1 + 64 + 512];
-    size_t finalOffset = 0;
-    finalTx[finalOffset++] = 1;
-    memcpy(finalTx + finalOffset, signature, 64);
-    finalOffset += 64;
-    memcpy(finalTx + finalOffset, message, messageLen);
-    finalOffset += messageLen;
+    Transaction tx;
+    tx.fee_payer = from;
+    tx.recent_blockhash = recentBlockhash;
+    tx.add(Instruction(Pubkey::fromBase58(SYSTEM_PROGRAM_B58),
+                       {AccountMeta::writable(from, true), AccountMeta::writable(to, false)}, data));
 
-    outTxBase64 = base64Encode(finalTx, finalOffset);
+    if (!tx.sign({Keypair::fromPrivateKey(privateKey)}))
+    {
+        return false;
+    }
+
+    outTxBase64 = tx.serializeBase64();
     return !outTxBase64.isEmpty();
 }
 
@@ -993,82 +984,30 @@ bool Infratic::buildAndSignMemoTransaction(const uint8_t *privateKey, size_t pri
                                            const String &memoString, const String &recentBlockhash,
                                            String &outTxBase64)
 {
-    uint8_t numRequiredSignatures = 1;
-    uint8_t numReadOnlySigned = 0;
-    uint8_t numReadOnlyUnsigned = 0;
-
-    uint8_t recentBlockhashBytes[32];
-    size_t rbLen = 32;
-    if (!base58Decode(recentBlockhash, recentBlockhashBytes, rbLen) || rbLen != 32)
-    {
-        Serial.println("❌ Blockhash decode error");
-        return false;
-    }
-
-    uint8_t programIdBytes[32];
-    size_t pidLen = 32;
-    if (!base58Decode(programIdBase58, programIdBytes, pidLen) || pidLen != 32)
-    {
-        Serial.println("❌ Program ID decode error");
-        return false;
-    }
-
-    uint8_t message[512];
-    size_t offset = 0;
-
-    message[offset++] = numRequiredSignatures;
-    message[offset++] = numReadOnlySigned;
-    message[offset++] = numReadOnlyUnsigned;
-    message[offset++] = 2;
-
-    memcpy(&message[offset], fromPub, 32);
-    offset += 32;
-    memcpy(&message[offset], programIdBytes, 32);
-    offset += 32;
-    memcpy(&message[offset], recentBlockhashBytes, 32);
-    offset += 32;
-
-    message[offset++] = 1;
-    message[offset++] = 1;
-    message[offset++] = 1;
-    message[offset++] = 0;
-
-    uint32_t dataLen = memoString.length();
-    if (dataLen < 128)
-    {
-        message[offset++] = (uint8_t)dataLen;
-    }
-    else
-    {
-        message[offset++] = (uint8_t)((dataLen & 0x7F) | 0x80);
-        message[offset++] = (uint8_t)(dataLen >> 7);
-    }
-
-    memcpy(&message[offset], memoString.c_str(), dataLen);
-    offset += dataLen;
-    size_t messageLen = offset;
-
     if (privLen < 64)
     {
         Serial.println("❌ Invalid private key");
         return false;
     }
 
-    const uint8_t *privKeyOnly = privateKey;
-    const uint8_t *pubKeyFromPriv = privateKey + 32;
+    Pubkey programId = Pubkey::fromBase58(programIdBase58);
+    if (programId.data.size() != 32)
+    {
+        Serial.println("❌ Program ID decode error");
+        return false;
+    }
 
-    uint8_t signature[64];
-    Ed25519::sign(signature, privKeyOnly, pubKeyFromPriv, message, messageLen);
+    Transaction tx;
+    tx.fee_payer = Pubkey{std::vector<uint8_t>(fromPub, fromPub + 32)};
+    tx.recent_blockhash = recentBlockhash;
+    tx.add(Instruction(programId, {}, std::vector<uint8_t>(memoString.begin(), memoString.end())));
 
-    uint8_t finalTx[1 + 64 + 512];
-    size_t finalOffset = 0;
-    finalTx[finalOffset++] = 1;
-    memcpy(finalTx + finalOffset, signature, 64);
-    finalOffset += 64;
-    memcpy(finalTx + finalOffset, message, messageLen);
-    finalOffset += messageLen;
+    if (!tx.sign({Keypair::fromPrivateKey(privateKey)}))
+    {
+        return false;
+    }
 
-    outTxBase64 = base64Encode(finalTx, finalOffset);
+    outTxBase64 = tx.serializeBase64();
     return !outTxBase64.isEmpty();
 }
 
@@ -1115,115 +1054,199 @@ void Transaction::add(const Instruction &ix)
     instructions.push_back(ix);
 }
 
-std::vector<uint8_t> Transaction::serializeMessage() const
+namespace
 {
-    std::vector<uint8_t> msg;
-    msg.push_back(1);
-    msg.push_back(0);
-    msg.push_back(0);
-
-    std::vector<Pubkey> accountKeys;
-    auto add_unique_key = [&](const Pubkey &k)
+    struct CompiledKey
     {
-        for (const auto &existing : accountKeys)
-        {
-            if (existing.data == k.data)
-                return;
-        }
-        accountKeys.push_back(k);
+        Pubkey key;
+        bool signer;
+        bool writable;
     };
 
-    add_unique_key(fee_payer);
-    for (const auto &ix : instructions)
+    // Collects unique accounts and orders them the way the runtime expects:
+    // fee payer, writable signers, readonly signers, writable, readonly.
+    std::vector<CompiledKey> compileKeys(const Transaction &tx, uint8_t header[3])
     {
-        for (const auto &acct : ix.accounts)
+        std::vector<CompiledKey> all;
+        auto add = [&](const Pubkey &k, bool signer, bool writable)
         {
-            add_unique_key(acct.pubkey);
-        }
-        add_unique_key(ix.programId);
-    }
-
-    msg.push_back(accountKeys.size());
-    for (const auto &k : accountKeys)
-    {
-        msg.insert(msg.end(), k.data.begin(), k.data.end());
-    }
-
-    uint8_t decoded[64];
-    size_t outLen = sizeof(decoded);
-    if (base58Decode(recent_blockhash, decoded, outLen))
-    {
-        msg.insert(msg.end(), decoded, decoded + outLen);
-    }
-
-    msg.push_back(instructions.size());
-    for (const auto &ix : instructions)
-    {
-        uint8_t program_id_index = 0;
-        for (size_t i = 0; i < accountKeys.size(); ++i)
-        {
-            if (accountKeys[i].data == ix.programId.data)
+            for (auto &e : all)
             {
-                program_id_index = i;
-                break;
-            }
-        }
-
-        msg.push_back(program_id_index);
-        msg.push_back(ix.accounts.size());
-
-        for (const auto &acct : ix.accounts)
-        {
-            for (size_t i = 0; i < accountKeys.size(); ++i)
-            {
-                if (accountKeys[i].data == acct.pubkey.data)
+                if (e.key.data == k.data)
                 {
-                    msg.push_back(i);
-                    break;
+                    e.signer = e.signer || signer;
+                    e.writable = e.writable || writable;
+                    return;
                 }
             }
+            all.push_back({k, signer, writable});
+        };
+
+        add(tx.fee_payer, true, true);
+        for (const auto &ix : tx.instructions)
+        {
+            for (const auto &acct : ix.accounts)
+            {
+                add(acct.pubkey, acct.isSigner, acct.isWritable);
+            }
+            add(ix.programId, false, false);
         }
 
-        msg.push_back(ix.data.size());
+        std::vector<CompiledKey> ordered;
+        ordered.push_back(all[0]);
+        const bool groups[4][2] = {{true, true}, {true, false}, {false, true}, {false, false}};
+        for (const auto &g : groups)
+        {
+            for (size_t i = 1; i < all.size(); i++)
+            {
+                if (all[i].signer == g[0] && all[i].writable == g[1])
+                    ordered.push_back(all[i]);
+            }
+        }
+
+        header[0] = header[1] = header[2] = 0;
+        for (const auto &k : ordered)
+        {
+            if (k.signer)
+            {
+                header[0]++;
+                if (!k.writable) header[1]++;
+            }
+            else if (!k.writable)
+            {
+                header[2]++;
+            }
+        }
+        return ordered;
+    }
+
+    int keyIndex(const std::vector<CompiledKey> &keys, const Pubkey &k)
+    {
+        for (size_t i = 0; i < keys.size(); i++)
+        {
+            if (keys[i].key.data == k.data) return (int)i;
+        }
+        return -1;
+    }
+}
+
+std::vector<uint8_t> Transaction::serializeMessage() const
+{
+    if (fee_payer.data.size() != 32)
+    {
+        Serial.println("❌ Transaction: fee payer not set");
+        return {};
+    }
+
+    uint8_t header[3];
+    std::vector<CompiledKey> keys = compileKeys(*this, header);
+
+    for (const auto &k : keys)
+    {
+        if (k.key.data.size() != 32)
+        {
+            Serial.println("❌ Transaction: invalid public key in accounts");
+            return {};
+        }
+    }
+
+    uint8_t blockhash[32];
+    size_t bhLen = sizeof(blockhash);
+    if (!base58Decode(recent_blockhash, blockhash, bhLen) || bhLen != 32)
+    {
+        Serial.println("❌ Transaction: invalid recent blockhash");
+        return {};
+    }
+
+    std::vector<uint8_t> msg(header, header + 3);
+    appendCompactU16(msg, keys.size());
+    for (const auto &k : keys)
+    {
+        msg.insert(msg.end(), k.key.data.begin(), k.key.data.end());
+    }
+    msg.insert(msg.end(), blockhash, blockhash + 32);
+
+    appendCompactU16(msg, instructions.size());
+    for (const auto &ix : instructions)
+    {
+        msg.push_back((uint8_t)keyIndex(keys, ix.programId));
+        appendCompactU16(msg, ix.accounts.size());
+        for (const auto &acct : ix.accounts)
+        {
+            msg.push_back((uint8_t)keyIndex(keys, acct.pubkey));
+        }
+        appendCompactU16(msg, ix.data.size());
         msg.insert(msg.end(), ix.data.begin(), ix.data.end());
     }
 
     return msg;
 }
 
-void Transaction::sign(const std::vector<Keypair> &signers)
+bool Transaction::sign(const std::vector<Keypair> &signers)
 {
-    extern Infratic solana;
     std::vector<uint8_t> msg = serializeMessage();
-
-    if (signers.empty())
-        return;
-
-    const Keypair &signer = signers[0];
-    if (signer.privkey.size() < 64)
+    if (msg.empty())
     {
-        Serial.println("❌ Invalid private key format");
-        return;
+        return false;
     }
 
-    signature.resize(64);
-    if (!solana.signMessageRaw(msg, signer.privkey, signature.data()))
+    uint8_t header[3];
+    std::vector<CompiledKey> keys = compileKeys(*this, header);
+
+    signatures.assign(header[0], std::vector<uint8_t>(64, 0));
+    bool ok = true;
+
+    for (uint8_t i = 0; i < header[0]; i++)
     {
-        Serial.println("❌ Signature failed");
+        const Keypair *found = nullptr;
+        for (const auto &kp : signers)
+        {
+            if (kp.privkey.size() >= 64 && kp.pubkey().data == keys[i].key.data)
+            {
+                found = &kp;
+                break;
+            }
+        }
+
+        if (!found)
+        {
+            Serial.println("❌ Missing signer: " + base58Encode(keys[i].key.data.data(), 32));
+            ok = false;
+            continue;
+        }
+
+        Ed25519::sign(signatures[i].data(), found->privkey.data(), found->privkey.data() + 32,
+                      msg.data(), msg.size());
     }
+
+    signature = signatures.empty() ? std::vector<uint8_t>() : signatures[0];
+    return ok;
 }
 
 String Transaction::serializeBase64() const
 {
     std::vector<uint8_t> msg = serializeMessage();
-    std::vector<uint8_t> finalTx;
+    if (msg.empty())
+    {
+        return "";
+    }
 
-    finalTx.push_back(1);
-    finalTx.insert(finalTx.end(), signature.begin(), signature.end());
+    // older code may only fill `signature`
+    std::vector<std::vector<uint8_t>> sigs = signatures;
+    if (sigs.empty() && signature.size() == 64)
+    {
+        sigs.push_back(signature);
+    }
+
+    std::vector<uint8_t> finalTx;
+    appendCompactU16(finalTx, sigs.size());
+    for (const auto &sig : sigs)
+    {
+        finalTx.insert(finalTx.end(), sig.begin(), sig.end());
+    }
     finalTx.insert(finalTx.end(), msg.begin(), msg.end());
 
-    Infratic lib("");
-    return lib.base64Encode(finalTx.data(), finalTx.size());
+    return toBase64(finalTx.data(), finalTx.size());
 }
 
 // ============================================================================

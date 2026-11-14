@@ -13,9 +13,21 @@
 
 #include "base58.h"
 
-// Forward declarations
-// std::vector<uint8_t> base58ToPubkey(const String &base58Str);
+// ============================================================================
+// ENCODING HELPERS
+// ============================================================================
+
 std::vector<uint8_t> encodeU64LE(uint64_t value);
+std::vector<uint8_t> encodeU64BE(uint64_t value); // e.g. Rust u64::to_be_bytes() PDA seeds
+std::vector<uint8_t> encodeU32LE(uint32_t value);
+std::vector<uint8_t> encodeI64LE(int64_t value);
+std::vector<uint8_t> base58ToPubkey(const String &base58Str);
+
+/** @brief Appends a Solana compact-u16 length (used in tx serialization) */
+void appendCompactU16(std::vector<uint8_t> &buffer, uint16_t value);
+
+/** @brief Appends an Anchor/Borsh string: u32 LE length + UTF-8 bytes */
+void appendBorshString(std::vector<uint8_t> &buffer, const String &str);
 
 // ============================================================================
 // STRUCTURES
@@ -69,14 +81,24 @@ struct Transaction
     String recent_blockhash;
     Pubkey fee_payer;
     std::vector<Instruction> instructions;
-    std::vector<uint8_t> signature;
+    std::vector<uint8_t> signature;               // fee payer signature (first one)
+    std::vector<std::vector<uint8_t>> signatures; // all signatures in message order
 
     void add(const Instruction &ix);
+
+    /**
+     * @brief Builds the legacy message. Accounts are ordered as Solana expects:
+     * fee payer, writable signers, readonly signers, writable, readonly.
+     */
     std::vector<uint8_t> serializeMessage() const;
-    void sign(const std::vector<Keypair> &signers);
+
+    /**
+     * @brief Signs with every keypair that is a required signer.
+     * @return false if a required signer is missing or the message is invalid
+     */
+    bool sign(const std::vector<Keypair> &signers);
     String serializeBase64() const;
 };
-std::vector<uint8_t> base58ToPubkey(const String &base58Str);
 
 // ============================================================================
 // ZK STRUCTURES (Add to Infratic-lib.h before class declaration)
