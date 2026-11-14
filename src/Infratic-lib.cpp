@@ -4,15 +4,137 @@
 // HELPER FUNCTIONS
 // ============================================================================
 
-extern "C" bool ed25519_decode_public_key(const uint8_t *buf)
+// ----------------------------------------------------------------------------
+// Ed25519 point check (used for PDA derivation)
+// A PDA must NOT be a valid ed25519 point. Field arithmetic below follows
+// TweetNaCl (public domain): 16 x 16-bit limbs, p = 2^255 - 19.
+// ----------------------------------------------------------------------------
+namespace
 {
-    return true;
+    typedef int64_t gf[16];
+    const gf GF1 = {1};
+    const gf GF_D = {0x78a3, 0x1359, 0x4dca, 0x75eb, 0xd8ab, 0x4141, 0x0a4d, 0x0070,
+                     0xe898, 0x7779, 0x4079, 0x8cc7, 0xfe73, 0x2b6f, 0x6cee, 0x5203};
+    const gf GF_I = {0xa0b0, 0x4a0e, 0x1b27, 0xc4ee, 0xe478, 0xad2f, 0x1806, 0x2f43,
+                     0xd7a7, 0x3dfb, 0x0099, 0x2b4d, 0xdf0b, 0x4fc1, 0x2480, 0x2b83};
+
+    void gfCarry(gf o)
+    {
+        for (int i = 0; i < 16; i++)
+        {
+            o[i] += (1LL << 16);
+            int64_t c = o[i] >> 16;
+            o[(i + 1) * (i < 15)] += c - 1 + 37 * (c - 1) * (i == 15);
+            o[i] -= c << 16;
+        }
+    }
+
+    void gfSelect(gf p, gf q, int b)
+    {
+        int64_t c = ~(b - 1);
+        for (int i = 0; i < 16; i++)
+        {
+            int64_t t = c & (p[i] ^ q[i]);
+            p[i] ^= t;
+            q[i] ^= t;
+        }
+    }
+
+    void gfPack(uint8_t *o, const gf n)
+    {
+        gf m, t;
+        for (int i = 0; i < 16; i++) t[i] = n[i];
+        gfCarry(t);
+        gfCarry(t);
+        gfCarry(t);
+        for (int j = 0; j < 2; j++)
+        {
+            m[0] = t[0] - 0xffed;
+            for (int i = 1; i < 15; i++)
+            {
+                m[i] = t[i] - 0xffff - ((m[i - 1] >> 16) & 1);
+                m[i - 1] &= 0xffff;
+            }
+            m[15] = t[15] - 0x7fff - ((m[14] >> 16) & 1);
+            int b = (m[15] >> 16) & 1;
+            m[14] &= 0xffff;
+            gfSelect(t, m, 1 - b);
+        }
+        for (int i = 0; i < 16; i++)
+        {
+            o[2 * i] = t[i] & 0xff;
+            o[2 * i + 1] = t[i] >> 8;
+        }
+    }
+
+    bool gfEqual(const gf a, const gf b)
+    {
+        uint8_t x[32], y[32];
+        gfPack(x, a);
+        gfPack(y, b);
+        return memcmp(x, y, 32) == 0;
+    }
+
+    void gfAdd(gf o, const gf a, const gf b) { for (int i = 0; i < 16; i++) o[i] = a[i] + b[i]; }
+    void gfSub(gf o, const gf a, const gf b) { for (int i = 0; i < 16; i++) o[i] = a[i] - b[i]; }
+
+    void gfMul(gf o, const gf a, const gf b)
+    {
+        int64_t t[31] = {0};
+        for (int i = 0; i < 16; i++)
+            for (int j = 0; j < 16; j++)
+                t[i + j] += a[i] * b[j];
+        for (int i = 0; i < 15; i++) t[i] += 38 * t[i + 16];
+        for (int i = 0; i < 16; i++) o[i] = t[i];
+        gfCarry(o);
+        gfCarry(o);
+    }
+
+    void gfSquare(gf o, const gf a) { gfMul(o, a, a); }
+
+    void gfPow2523(gf o, const gf in)
+    {
+        gf c;
+        for (int a = 0; a < 16; a++) c[a] = in[a];
+        for (int a = 250; a >= 0; a--)
+        {
+            gfSquare(c, c);
+            if (a != 1) gfMul(c, c, in);
+        }
+        for (int a = 0; a < 16; a++) o[a] = c[a];
+    }
 }
 
-static bool decodePointWrapper(const uint8_t hash[32])
+bool Infratic::isOnCurve(const uint8_t key[32])
 {
-    extern bool ed25519_decode_public_key(const uint8_t *buf);
-    return !ed25519_decode_public_key(hash);
+    gf x, y, num, den, den2, den4, den6, t, chk;
+    for (int i = 0; i < 16; i++) y[i] = key[2 * i] + ((int64_t)key[2 * i + 1] << 8);
+    y[15] &= 0x7fff;
+
+    // x^2 = (y^2 - 1) / (d*y^2 + 1)
+    gfSquare(num, y);
+    gfMul(den, num, GF_D);
+    gfSub(num, num, GF1);
+    gfAdd(den, GF1, den);
+
+    gfSquare(den2, den);
+    gfSquare(den4, den2);
+    gfMul(den6, den4, den2);
+    gfMul(t, den6, num);
+    gfMul(t, t, den);
+    gfPow2523(t, t);
+    gfMul(t, t, num);
+    gfMul(t, t, den);
+    gfMul(t, t, den);
+    gfMul(x, t, den);
+
+    gfSquare(chk, x);
+    gfMul(chk, chk, den);
+    if (!gfEqual(chk, num)) gfMul(x, x, GF_I);
+
+    gfSquare(chk, x);
+    gfMul(chk, chk, den);
+    return gfEqual(chk, num);
 }
 
 std::vector<uint8_t> encodeU64LE(uint64_t value)
@@ -682,6 +804,21 @@ bool Infratic::findProgramAddress(const std::vector<std::vector<uint8_t>> &seeds
                                   const std::vector<uint8_t> &programId,
                                   std::vector<uint8_t> &outPDA, uint8_t &outBump)
 {
+    // Solana limits: max 16 seeds (bump included), each max 32 bytes
+    if (programId.size() != 32 || seeds.size() > 15)
+    {
+        Serial.println("❌ Invalid PDA input (program id or seed count)");
+        return false;
+    }
+    for (const auto &seed : seeds)
+    {
+        if (seed.size() > 32)
+        {
+            Serial.println("❌ PDA seed longer than 32 bytes");
+            return false;
+        }
+    }
+
     const std::string marker = "ProgramDerivedAddress";
 
     for (int bump = 255; bump >= 0; --bump)
@@ -704,8 +841,8 @@ bool Infratic::findProgramAddress(const std::vector<std::vector<uint8_t>> &seeds
         mbedtls_sha256_finish_ret(&ctx, hash);
         mbedtls_sha256_free(&ctx);
 
-        bool isValid = decodePointWrapper(hash);
-        if (isValid)
+        // valid PDA = hash that is NOT on the ed25519 curve
+        if (isOnCurve(hash))
         {
             continue;
         }

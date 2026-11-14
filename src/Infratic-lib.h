@@ -333,6 +333,13 @@ public:
                             const std::vector<uint8_t> &programId,
                             std::vector<uint8_t> &outPDA, uint8_t &outBump);
 
+    /**
+     * @brief Checks if 32 bytes are a valid ed25519 point (same as PublicKey.isOnCurve)
+     * @param key 32-byte key
+     * @return true if the key is on the curve (PDAs are always off-curve)
+     */
+    static bool isOnCurve(const uint8_t key[32]);
+
     // ========================================================================
     // ANCHOR FRAMEWORK SUPPORT
     // ========================================================================
