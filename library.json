@@ -1,0 +1,35 @@
+{
+  "name": "Infratic",
+  "version": "1.1.0",
+  "description": "Solana blockchain library for ESP32 - transactions, PDA, Anchor programs, x402 escrow and RPC helpers",
+  "keywords": ["solana", "esp32", "blockchain", "anchor", "iot", "spl-token", "web3", "depin", "escrow", "x402"],
+  "authors": [
+    {
+      "name": "asimbugra",
+      "email": "asimbugra1@gmail.com"
+    }
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/infraticxyz-lab/Infratic-lib",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/infraticxyz-lab/Infratic-lib.git"
+  },
+  "frameworks": ["arduino"],
+  "platforms": ["espressif32"],
+  "dependencies": [
+    {
+      "owner": "bblanchon",
+      "name": "ArduinoJson",
+      "version": "^6.21.5"
+    },
+    {
+      "owner": "rweather",
+      "name": "Crypto",
+      "version": "^0.4.0"
+    }
+  ],
+  "export": {
+    "exclude": ["test"]
+  }
+}
