@@ -1,0 +1,7 @@
+{
+  "name": "infratic-host-test-vectors",
+  "private": true,
+  "type": "module",
+  "scripts": { "gen": "node gen.mjs" },
+  "dependencies": { "@solana/web3.js": "1.98.0", "bs58": "6.0.0" }
+}

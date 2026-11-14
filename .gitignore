@@ -1,0 +1,6 @@
+.DS_Store
+.vscode/
+.pio/
+test/host/.deps/
+test/host/.build/
+test/host/js/node_modules/
