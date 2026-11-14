@@ -76,7 +76,7 @@ struct Transaction
     void sign(const std::vector<Keypair> &signers);
     String serializeBase64() const;
 };
-    std::vector<uint8_t> base58ToPubkey(const String &base58Str);
+std::vector<uint8_t> base58ToPubkey(const String &base58Str);
 
 // ============================================================================
 // ZK STRUCTURES (Add to Infratic-lib.h before class declaration)
@@ -114,6 +114,55 @@ struct zkSNARKProof
     bool isValid;
 };
 
+// Escrow Status Enum
+enum class EscrowStatus : uint8_t
+{
+    Active = 0,
+    Completed = 1,
+    Cancelled = 2,
+    Disputed = 3,
+    ForceClosed = 4
+};
+
+// Escrow account (data read from the chain)
+struct EscrowAccount
+{
+    String buyer;           // Buyer pubkey (base58)
+    String seller;          // Seller pubkey (base58)
+    uint64_t amount;        // Escrow amount (lamports)
+    String orderId;         // Order ID (max 64 chars)
+    EscrowStatus status;    // Escrow status
+    int64_t createdAt;      // Creation time
+    int64_t expiresAt;      // Expiration time
+    uint8_t bump;           // PDA bump seed
+    bool deliveryConfirmed; // Delivery confirmed
+    bool disputeInitiated;  // Dispute state
+    String proofHash;       // Delivery proof hash
+};
+
+// Function results
+struct EscrowCreateResult
+{
+    bool success;
+    String escrowPDA;    // Created escrow PDA address
+    String txSignature;  // Transaction signature
+    uint8_t bump;        // PDA bump
+    String errorMessage; // Error message (if any)
+};
+
+struct EscrowTxResult
+{
+    bool success;
+    String txSignature;
+    String errorMessage;
+};
+
+struct EscrowAccountResult
+{
+    bool success;
+    EscrowAccount account;
+    String errorMessage;
+};
 // ============================================================================
 // MAIN LIBRARY CLASS
 // ============================================================================
@@ -580,6 +629,88 @@ public:
         const String &metadata,
         String &outTxSignature);
 
+    /**
+     * @brief Sets the program ID used by the escrow functions.
+     * Must be called BEFORE any escrow_... function.
+     * @param programId Base58 address of the escrow program.
+     */
+    void setEscrowProgramId(const String &programId);
+
+    // ============================================================================
+    // X402 ESCROW PROTOCOL FUNCTIONS
+    // ============================================================================
+
+    /**
+    /**
+     * @brief Reads the current state of an escrow account.
+     * @param escrowPdaBase58 Address of the escrow account.
+     * @param commitment "finalized" (default) or "confirmed" (faster).
+     * @return EscrowAccountResult - success flag and the account data.
+     */
+    EscrowAccountResult getEscrowAccount(const String &escrowPdaBase58, const String &commitment = "finalized");
+
+    /**
+     * @brief Creates a new escrow.
+     * @return EscrowCreateResult - success flag, PDA, signature and bump.
+     */
+    EscrowCreateResult escrow_create(
+        const String &buyerPrivateKeyBase58,
+        const String &buyerPubkeyBase58,
+        const String &sellerPubkeyBase58,
+        uint64_t amount,
+        const String &order_id,
+        int64_t expiration_duration);
+
+    /**
+     * @brief Seller confirms the delivery.
+     * @return EscrowTxResult - success flag and transaction signature.
+     */
+    EscrowTxResult escrow_confirmDelivery(
+        const String &sellerPrivateKeyBase58,
+        const String &sellerPubkeyBase58,
+        const String &escrowPdaBase58,
+        const String &proof_hash);
+
+    /**
+     * @brief Buyer releases the escrow to the seller.
+     * @return EscrowTxResult - success flag and transaction signature.
+     */
+    EscrowTxResult escrow_release(
+        const String &buyerPrivateKeyBase58,
+        const String &buyerPubkeyBase58,
+        const String &sellerPubkeyBase58,
+        const String &escrowPdaBase58);
+
+    /**
+     * @brief Buyer cancels an expired escrow.
+     * @return EscrowTxResult - success flag and transaction signature.
+     */
+    EscrowTxResult escrow_cancel(
+        const String &buyerPrivateKeyBase58,
+        const String &buyerPubkeyBase58,
+        const String &escrowPdaBase58);
+
+    /**
+     * @brief Seller initiates a dispute.
+     * @return EscrowTxResult - success flag and transaction signature.
+     */
+    EscrowTxResult escrow_initiateDispute(
+        const String &sellerPrivateKeyBase58,
+        const String &sellerPubkeyBase58,
+        const String &escrowPdaBase58,
+        const String &reason,
+        const String &evidence);
+
+    /**
+     * @brief (Emergency) Authority force closes the escrow.
+     * @return EscrowTxResult - success flag and transaction signature.
+     */
+    EscrowTxResult escrow_forceClose(
+        const String &authorityPrivateKeyBase58,
+        const String &authorityPubkeyBase58,
+        const String &buyerPubkeyBase58,
+        const String &escrowPdaBase58);
+
 private:
     String _rpcUrl;
 
@@ -593,6 +724,29 @@ private:
                                      const uint8_t *fromPub, const String &programIdBase58,
                                      const String &memoString, const String &recentBlockhash,
                                      String &outTxBase64);
+
+    String _escrowProgramId; // escrow program ID set at runtime
+    Pubkey SYSTEM_PROGRAM_ID = Pubkey::fromBase58("11111111111111111111111111111111");
+
+    
+
+    // Anchor string (u32 length + data) serialization
+    void serializeAnchorString(std::vector<uint8_t> &buffer, const String &str);
+
+    /**
+     * @brief Fetches raw account data (base64).
+     * @param accountBase58 Account address.
+     * @param outBase64Data Output (base64 data).
+     * @param commitment "finalized" (default) or "confirmed" (faster).
+     */
+    bool getAccountInfo(const String &accountBase58, String &outBase64Data, const String &commitment = "finalized");
+
+    // Deserialization helpers
+    bool deserializeEscrowAccount(const std::vector<uint8_t> &data, EscrowAccount &outAccount);
+    uint32_t decodeU32LE(const uint8_t *buffer);
+    uint64_t decodeU64LE(const uint8_t *buffer);
+    int64_t decodeI64LE(const uint8_t *buffer);
+    String decodeAnchorString(const uint8_t *buffer, size_t &offset, size_t max_len);
 };
 
 #endif // INFRATIC_LIB_H

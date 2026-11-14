@@ -24,6 +24,13 @@ std::vector<uint8_t> encodeU64LE(uint64_t value)
     }
     return result;
 }
+std::vector<uint8_t> encodeI64LE(int64_t value) {
+    std::vector<uint8_t> result(8);
+    for (int i = 0; i < 8; i++) {
+        result[i] = (uint8_t)((value >> (8 * i)) & 0xFF);
+    }
+    return result;
+}
 
 std::vector<uint8_t> base58ToPubkey(const String &base58Str)
 {
@@ -2391,4 +2398,828 @@ bool Infratic::storeBatchInAnchor(
 
     Serial.println("✅ Batch stored: " + outTxSignature);
     return confirmTransaction(outTxSignature, 5000);
+}
+
+
+// ============================================================================
+// PROGRAM ID SETTER
+// ============================================================================
+
+void Infratic::setEscrowProgramId(const String &programId) {
+    _escrowProgramId = programId;
+    Serial.println("✅ Escrow Program ID set: " + _escrowProgramId);
+}
+
+// ============================================================================
+// NEW RPC & DESERIALIZATION HELPERS
+// ============================================================================
+
+// Little-endian decoders
+uint32_t Infratic::decodeU32LE(const uint8_t *buffer) {
+    return (uint32_t)buffer[0] | ((uint32_t)buffer[1] << 8) |
+           ((uint32_t)buffer[2] << 16) | ((uint32_t)buffer[3] << 24);
+}
+
+uint64_t Infratic::decodeU64LE(const uint8_t *buffer) {
+    return (uint64_t)decodeU32LE(buffer) | ((uint64_t)decodeU32LE(buffer + 4) << 32);
+}
+
+int64_t Infratic::decodeI64LE(const uint8_t *buffer) {
+    return (int64_t)decodeU64LE(buffer);
+}
+
+/**
+ * @brief Decodes an Anchor [u32 len][data] string.
+ * @param buffer Raw data buffer (must start AFTER the discriminator).
+ * @param offset Current read offset, updated by the call.
+ * @param max_len Max space reserved for the string (to skip padding).
+ */
+String Infratic::decodeAnchorString(const uint8_t *buffer, size_t &offset, size_t max_len) {
+    uint32_t len = decodeU32LE(buffer + offset);
+    offset += 4; // skip the length field
+    
+    String str = "";
+    if (len > 0 && len <= max_len) {
+        str = String((char*)(buffer + offset), len);
+    }
+    
+    offset += max_len; // skip string data and remaining padding
+    return str;
+}
+
+
+// getAccountInfo
+
+// ============================================================================
+// RPC & DESERIALIZATION HELPERS
+// ============================================================================
+
+/**
+ * @brief Fetches raw account data (base64).
+ * @param commitment "finalized" (default) or "confirmed" (faster).
+ */
+bool Infratic::getAccountInfo(const String &accountBase58, String &outBase64Data, const String &commitment) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+
+    if (!http.begin(client, _rpcUrl)) {
+        Serial.println("❌ getAccountInfo: HTTP begin failed");
+        return false;
+    }
+
+    // add "commitment" to the RPC params
+    String body = String(R"({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[")") +
+                  accountBase58 +
+                  R"(",{"encoding":"base64", "commitment":")" + commitment + R"("}]})";
+
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(body);
+
+    if (code != 200) {
+        Serial.printf("❌ getAccountInfo: HTTP code %d\n", code);
+        http.end();
+        return false;
+    }
+
+    String response = http.getString();
+    http.end();
+
+    DynamicJsonDocument doc(4096); // data can be large
+    if (deserializeJson(doc, response) || doc["error"]) {
+        Serial.println("❌ getAccountInfo: RPC error or JSON parse error");
+        return false;
+    }
+
+    JsonVariant data = doc["result"]["value"]["data"][0];
+    if (data.isNull() || !data.is<String>()) {
+        Serial.println("❌ getAccountInfo: Account not found or data is null");
+        return false;
+    }
+
+    outBase64Data = data.as<String>();
+    return true;
+}
+
+/**
+ * @brief Reads the escrow account.
+ *
+ * @param commitment "finalized" (default) or "confirmed" (faster).
+ */
+EscrowAccountResult Infratic::getEscrowAccount(const String &escrowPdaBase58, const String &commitment) {
+    Serial.println("\n=== Get Escrow Account Info ===");
+    
+    if (_escrowProgramId.isEmpty()) {
+        Serial.println("❌ Error: Escrow Program ID is not set.");
+        return {false, {}, "Program ID not set"};
+    }
+
+    // 1. Fetch raw data (pass commitment through)
+    String base64Data;
+    if (!getAccountInfo(escrowPdaBase58, base64Data, commitment)) {
+        return {false, {}, "Failed to get account info (getAccountInfo fail)"};
+    }
+
+    // 2. Decode base64 data
+    size_t decodedLen = 0;
+    size_t dataLen = base64Data.length();
+    
+    mbedtls_base64_decode(NULL, 0, &decodedLen, (const unsigned char*)base64Data.c_str(), dataLen);
+    
+    std::vector<uint8_t> decodedData(decodedLen);
+    
+    int ret = mbedtls_base64_decode(decodedData.data(), decodedData.size(), &decodedLen,
+                                    (const unsigned char*)base64Data.c_str(), dataLen);
+
+    if (ret != 0) {
+        Serial.println("❌ Base64 decode error");
+        return {false, {}, "Base64 decode error"};
+    }
+    
+    decodedData.resize(decodedLen); // shrink to real size
+
+    // 3. Deserialize the data
+    EscrowAccount account;
+    if (!deserializeEscrowAccount(decodedData, account)) {
+        return {false, {}, "Failed to decode account data (deserialize fail)"};
+    }
+
+    Serial.println("✅ Escrow account read successfully");
+    Serial.println("   Buyer: " + account.buyer);
+    Serial.println("   Status: " + String((int)account.status));
+
+    return {true, account, ""};
+}
+
+/**
+ * @brief Converts raw account data into an EscrowAccount.
+ */
+bool Infratic::deserializeEscrowAccount(const std::vector<uint8_t> &data, EscrowAccount &outAccount) {
+    // Anchor account data always starts with an 8 byte discriminator
+    const size_t ANCHOR_DISCRIMINATOR_SIZE = 8;
+    // Total size of the Rust struct (from InitSpace)
+    // 32+32+8 + (4+64) + 1+8+8+1+1+1 + (4+128) = 288 bytes
+    const size_t ESCROW_ACCOUNT_DATA_SIZE = 288;
+
+    if (data.size() < ANCHOR_DISCRIMINATOR_SIZE + ESCROW_ACCOUNT_DATA_SIZE) {
+        Serial.printf("❌ Deserialize Error: data too short (expected: %d, got: %d)\n",
+            ANCHOR_DISCRIMINATOR_SIZE + ESCROW_ACCOUNT_DATA_SIZE, data.size());
+        return false;
+    }
+    
+    // Point the buffer after the discriminator
+    const uint8_t *buffer = data.data() + ANCHOR_DISCRIMINATOR_SIZE;
+    size_t offset = 0;
+
+    // Read in Rust struct order:
+    outAccount.buyer = base58Encode(buffer + offset, 32);
+    offset += 32;
+
+    outAccount.seller = base58Encode(buffer + offset, 32);
+    offset += 32;
+
+    outAccount.amount = decodeU64LE(buffer + offset);
+    offset += 8;
+
+    outAccount.orderId = decodeAnchorString(buffer, offset, 64); // max_len = 64
+
+    outAccount.status = (EscrowStatus)buffer[offset];
+    offset += 1;
+
+    outAccount.createdAt = decodeI64LE(buffer + offset);
+    offset += 8;
+
+    outAccount.expiresAt = decodeI64LE(buffer + offset);
+    offset += 8;
+
+    outAccount.bump = buffer[offset];
+    offset += 1;
+
+    outAccount.deliveryConfirmed = (bool)buffer[offset];
+    offset += 1;
+
+    outAccount.disputeInitiated = (bool)buffer[offset];
+    offset += 1;
+    
+    outAccount.proofHash = decodeAnchorString(buffer, offset, 128); // max_len = 128
+    
+    return true;
+}
+
+
+// ============================================================================
+// HELPER IMPLEMENTATIONS
+// ============================================================================
+
+void Infratic::serializeAnchorString(std::vector<uint8_t> &buffer, const String &str) {
+    uint32_t len = str.length();
+    buffer.push_back(len & 0xFF);
+    buffer.push_back((len >> 8) & 0xFF);
+    buffer.push_back((len >> 16) & 0xFF);
+    buffer.push_back((len >> 24) & 0xFF);
+    buffer.insert(buffer.end(), str.begin(), str.end());
+}
+
+
+
+// ============================================================================
+// ESCROW CREATE
+// ============================================================================
+
+EscrowCreateResult Infratic::escrow_create(
+    const String &buyerPrivateKeyBase58,
+    const String &buyerPubkeyBase58,
+    const String &sellerPubkeyBase58,
+    uint64_t amount,
+    const String &order_id,
+    int64_t expiration_duration
+) {
+    Serial.println("\n=== 1. Create Escrow (FIXED) ===");
+
+    if (_escrowProgramId.isEmpty()) {
+        Serial.println("❌ Error: Escrow Program ID is not set.");
+        return {false, "", "", 0, "Program ID not set"};
+    }
+
+    // 1. Private key decode
+    uint8_t privateKey[128];
+    size_t privLen = sizeof(privateKey);
+    if (!base58Decode(buyerPrivateKeyBase58, privateKey, privLen) || privLen < 64) {
+        Serial.println("❌ Failed to decode buyer private key");
+        return {false, "", "", 0, "Invalid buyer private key"};
+    }
+    
+    Keypair buyerKeypair = Keypair::fromPrivateKey(privateKey);
+    Pubkey buyer = Pubkey::fromBase58(buyerPubkeyBase58);
+    Pubkey seller = Pubkey::fromBase58(sellerPubkeyBase58);
+    Pubkey program = Pubkey::fromBase58(_escrowProgramId);
+
+    // 2. PDA Derivation
+    std::vector<std::vector<uint8_t>> seeds = {
+        {'e', 's', 'c', 'r', 'o', 'w'},
+        std::vector<uint8_t>(order_id.begin(), order_id.end()),
+        buyer.data
+    };
+    
+    String pdaAddress;
+    uint8_t bump;
+    if (!derivePDA(seeds, _escrowProgramId, pdaAddress, bump)) {
+        Serial.println("❌ Failed to derive escrow PDA address");
+        return {false, "", "", 0, "PDA derivation failed"};
+    }
+    
+    Pubkey escrowPda = Pubkey::fromBase58(pdaAddress);
+    Serial.println("✅ PDA derived: " + pdaAddress);
+    Serial.printf("   Bump: %d\n", bump);
+
+    // 3. Account size and rent
+    // Escrow struct size: 8 (discriminator) + 292 (data) = 300 bytes
+    const size_t ESCROW_ACCOUNT_SIZE = 300;
+    
+    // Rent estimate (Solana devnet)
+    // Approx: 19.055441478 lamports/byte * 300 bytes = ~5,716,632 lamports
+    const uint64_t RENT_LAMPORTS = 5800000; // ~0.0058 SOL (with safety margin)
+    
+    Serial.printf("💰 Rent: %llu lamports\n", RENT_LAMPORTS);
+    Serial.printf("💰 Transfer amount: %llu lamports\n", amount);
+    Serial.printf("💰 TOTAL: %llu lamports\n", RENT_LAMPORTS + amount);
+
+    // 4. Check that the buyer has enough balance
+    uint64_t buyerBalance = 0;
+    if (!getSolBalance(buyerPubkeyBase58, buyerBalance)) {
+        return {false, pdaAddress, "", bump, "Failed to get buyer balance"};
+    }
+    
+    uint64_t totalRequired = RENT_LAMPORTS + amount;
+    if (buyerBalance < totalRequired) {
+        Serial.printf("❌ Insufficient balance! Required: %llu, Available: %llu\n",
+                     totalRequired, buyerBalance);
+        return {false, pdaAddress, "", bump, "Insufficient buyer balance"};
+    }
+
+    // 5. Build instruction data
+    std::vector<uint8_t> instructionData = calculateDiscriminator("create_escrow");
+    
+    // amount (u64, little-endian)
+    std::vector<uint8_t> amountBytes = encodeU64LE(amount);
+    instructionData.insert(instructionData.end(), amountBytes.begin(), amountBytes.end());
+    
+    // order_id (Anchor String: u32 length + data)
+    serializeAnchorString(instructionData, order_id);
+    
+    // expiration (i64, little-endian)
+    std::vector<uint8_t> expBytes = encodeI64LE(expiration_duration);
+    instructionData.insert(instructionData.end(), expBytes.begin(), expBytes.end());
+    
+    // bump (u8)
+    instructionData.push_back(bump);
+
+    Serial.printf("📦 Instruction size: %d bytes\n", instructionData.size());
+
+    // 6. Account order must match the program
+    // Order in the Rust program: escrow, buyer, seller, system_program
+    Instruction ix(
+        program,
+        {
+            AccountMeta::writable(escrowPda, false),  // escrow (writable, not signer)
+            AccountMeta::writable(buyer, true),        // buyer (writable, signer)
+            AccountMeta{seller, false, false},         // seller (readonly, not signer)
+            AccountMeta{SYSTEM_PROGRAM_ID, false, false} // system_program
+        },
+        instructionData
+    );
+
+    // 7. Build and send the transaction
+    String blockhash = getLatestBlockhash();
+    if (blockhash.isEmpty()) {
+        return {false, pdaAddress, "", bump, "Failed to get blockhash"};
+    }
+
+    Transaction tx;
+    tx.fee_payer = buyer;
+    tx.recent_blockhash = blockhash;
+    tx.add(ix);
+    tx.sign({buyerKeypair});
+
+    String txSignature;
+    String txBase64 = tx.serializeBase64();
+    
+    Serial.println("📤 Sending transaction...");
+    
+    if (!sendRawTransaction(txBase64, txSignature)) {
+        Serial.println("❌ Failed to send escrow create transaction");
+        return {false, pdaAddress, "", bump, "sendRawTransaction failed"};
+    }
+
+    Serial.println("✅ Escrow create transaction sent: " + txSignature);
+    
+    // 8. Transaction confirmation
+    if (!confirmTransaction(txSignature, 15000)) { // wait 15 seconds
+        Serial.println("⚠️  Transaction not confirmed (timeout)");
+        return {true, pdaAddress, txSignature, bump, "Transaction sent but not confirmed"};
+    }
+    
+    Serial.println("✅ Escrow created successfully!");
+    return {true, pdaAddress, txSignature, bump, ""};
+}
+
+
+// ============================================================================
+// ESCROW CONFIRM DELIVERY
+// ============================================================================
+
+EscrowTxResult Infratic::escrow_confirmDelivery(
+    const String &sellerPrivateKeyBase58,
+    const String &sellerPubkeyBase58,
+    const String &escrowPdaBase58,
+    const String &proof_hash
+) {
+    Serial.println("\n=== 2. Confirm Delivery (FIXED) ===");
+    
+    if (_escrowProgramId.isEmpty()) {
+        Serial.println("❌ Error: Escrow Program ID is not set.");
+        return {false, "", "Program ID not set"};
+    }
+
+    // 1. Private key decode
+    uint8_t privateKey[128];
+    size_t privLen = sizeof(privateKey);
+    if (!base58Decode(sellerPrivateKeyBase58, privateKey, privLen) || privLen < 64) {
+        return {false, "", "Invalid seller private key"};
+    }
+    
+    Keypair sellerKeypair = Keypair::fromPrivateKey(privateKey);
+    Pubkey seller = Pubkey::fromBase58(sellerPubkeyBase58);
+    Pubkey escrowPda = Pubkey::fromBase58(escrowPdaBase58);
+    Pubkey program = Pubkey::fromBase58(_escrowProgramId);
+
+    // 2. Check the escrow state first
+    Serial.println("📋 Checking escrow state...");
+    EscrowAccountResult accountCheck = getEscrowAccount(escrowPdaBase58, "confirmed");
+    
+    if (!accountCheck.success) {
+        Serial.println("❌ Could not read escrow account!");
+        return {false, "", "Failed to read escrow account"};
+    }
+    
+    if (accountCheck.account.status != EscrowStatus::Active) {
+        Serial.println("❌ Escrow is not active!");
+        return {false, "", "Escrow is not active"};
+    }
+    
+    if (accountCheck.account.seller != sellerPubkeyBase58) {
+        Serial.println("❌ Unauthorized! You are not the seller.");
+        return {false, "", "Unauthorized: not the seller"};
+    }
+
+    // 3. Build instruction data
+    std::vector<uint8_t> instructionData = calculateDiscriminator("confirm_delivery");
+    serializeAnchorString(instructionData, proof_hash);
+
+    Serial.printf("📦 Instruction size: %d bytes\n", instructionData.size());
+
+    // 4. Build instruction (Rust order: escrow, seller)
+    Instruction ix(
+        program,
+        {
+            AccountMeta::writable(escrowPda, false), // escrow (writable, not signer)
+            AccountMeta::signer(seller)              // seller (signer)
+        },
+        instructionData
+    );
+
+    // 5. Build and send the transaction
+    String blockhash = getLatestBlockhash();
+    if (blockhash.isEmpty()) return {false, "", "Failed to get blockhash"};
+
+    Transaction tx;
+    tx.fee_payer = seller;
+    tx.recent_blockhash = blockhash;
+    tx.add(ix);
+    tx.sign({sellerKeypair});
+
+    String txSignature;
+    String txBase64 = tx.serializeBase64();
+    
+    Serial.println("📤 Sending transaction...");
+    
+    if (!sendRawTransaction(txBase64, txSignature)) {
+        return {false, "", "sendRawTransaction failed"};
+    }
+
+    Serial.println("✅ Delivery confirmation sent: " + txSignature);
+    
+    if (!confirmTransaction(txSignature, 15000)) {
+        return {true, txSignature, "Transaction sent but not confirmed"};
+    }
+    
+    Serial.println("✅ Delivery confirmed successfully!");
+    return {true, txSignature, ""};
+}
+
+
+// ============================================================================
+// ESCROW RELEASE
+// ============================================================================
+
+EscrowTxResult Infratic::escrow_release(
+    const String &buyerPrivateKeyBase58,
+    const String &buyerPubkeyBase58,
+    const String &sellerPubkeyBase58,
+    const String &escrowPdaBase58
+) {
+    Serial.println("\n=== 3. Release Escrow (FIXED) ===");
+    
+    if (_escrowProgramId.isEmpty()) {
+        Serial.println("❌ Error: Escrow Program ID is not set.");
+        return {false, "", "Program ID not set"};
+    }
+
+    // 1. Private key decode
+    uint8_t privateKey[128];
+    size_t privLen = sizeof(privateKey);
+    if (!base58Decode(buyerPrivateKeyBase58, privateKey, privLen) || privLen < 64) {
+        return {false, "", "Invalid buyer private key"};
+    }
+    
+    Keypair buyerKeypair = Keypair::fromPrivateKey(privateKey);
+    Pubkey buyer = Pubkey::fromBase58(buyerPubkeyBase58);
+    Pubkey seller = Pubkey::fromBase58(sellerPubkeyBase58);
+    Pubkey escrowPda = Pubkey::fromBase58(escrowPdaBase58);
+    Pubkey program = Pubkey::fromBase58(_escrowProgramId);
+
+    // 2. Check the escrow state
+    Serial.println("📋 Checking escrow state...");
+    EscrowAccountResult accountCheck = getEscrowAccount(escrowPdaBase58, "confirmed");
+    
+    if (!accountCheck.success) {
+        Serial.println("❌ Could not read escrow account!");
+        return {false, "", "Failed to read escrow account"};
+    }
+    
+    if (accountCheck.account.status != EscrowStatus::Active) {
+        Serial.println("❌ Escrow is not active!");
+        return {false, "", "Escrow is not active"};
+    }
+    
+    if (accountCheck.account.buyer != buyerPubkeyBase58) {
+        Serial.println("❌ Unauthorized! You are not the buyer.");
+        return {false, "", "Unauthorized: not the buyer"};
+    }
+    
+    if (!accountCheck.account.deliveryConfirmed) {
+        Serial.println("⚠️  Warning: delivery is not confirmed yet!");
+        // You can return here if you want
+    }
+
+    // 3. Build instruction data
+    std::vector<uint8_t> instructionData = calculateDiscriminator("release_escrow");
+
+    // 4. Build instruction (Rust order: escrow, buyer, seller)
+    Instruction ix(
+        program,
+        {
+            AccountMeta::writable(escrowPda, false), // escrow (writable, not signer)
+            AccountMeta::signer(buyer),              // buyer (signer)
+            AccountMeta::writable(seller, false)     // seller (writable, not signer)
+        },
+        instructionData
+    );
+
+    // 5. Build and send the transaction
+    String blockhash = getLatestBlockhash();
+    if (blockhash.isEmpty()) return {false, "", "Failed to get blockhash"};
+
+    Transaction tx;
+    tx.fee_payer = buyer;
+    tx.recent_blockhash = blockhash;
+    tx.add(ix);
+    tx.sign({buyerKeypair});
+
+    String txSignature;
+    String txBase64 = tx.serializeBase64();
+    
+    Serial.println("📤 Sending transaction...");
+    
+    if (!sendRawTransaction(txBase64, txSignature)) {
+        return {false, "", "sendRawTransaction failed"};
+    }
+
+    Serial.println("✅ Escrow released: " + txSignature);
+    
+    if (!confirmTransaction(txSignature, 15000)) {
+        return {true, txSignature, "Transaction sent but not confirmed"};
+    }
+    
+    Serial.println("✅ Payment transferred to the seller!");
+    return {true, txSignature, ""};
+}
+
+
+// ============================================================================
+// ESCROW CANCEL
+// ============================================================================
+
+EscrowTxResult Infratic::escrow_cancel(
+    const String &buyerPrivateKeyBase58,
+    const String &buyerPubkeyBase58,
+    const String &escrowPdaBase58
+) {
+    Serial.println("\n=== 4. Cancel Escrow (FIXED) ===");
+
+    if (_escrowProgramId.isEmpty()) {
+        Serial.println("❌ Error: Escrow Program ID is not set.");
+        return {false, "", "Program ID not set"};
+    }
+
+    // 1. Private key decode
+    uint8_t privateKey[128];
+    size_t privLen = sizeof(privateKey);
+    if (!base58Decode(buyerPrivateKeyBase58, privateKey, privLen) || privLen < 64) {
+        return {false, "", "Invalid buyer private key"};
+    }
+    
+    Keypair buyerKeypair = Keypair::fromPrivateKey(privateKey);
+    Pubkey buyer = Pubkey::fromBase58(buyerPubkeyBase58);
+    Pubkey escrowPda = Pubkey::fromBase58(escrowPdaBase58);
+    Pubkey program = Pubkey::fromBase58(_escrowProgramId);
+
+    // 2. Check the escrow state
+    Serial.println("📋 Checking escrow state...");
+    EscrowAccountResult accountCheck = getEscrowAccount(escrowPdaBase58, "confirmed");
+    
+    if (!accountCheck.success) {
+        Serial.println("❌ Could not read escrow account!");
+        return {false, "", "Failed to read escrow account"};
+    }
+    
+    if (accountCheck.account.status != EscrowStatus::Active) {
+        Serial.println("❌ Escrow is not active!");
+        return {false, "", "Escrow is not active"};
+    }
+    
+    if (accountCheck.account.buyer != buyerPubkeyBase58) {
+        Serial.println("❌ Unauthorized! You are not the buyer.");
+        return {false, "", "Unauthorized: not the buyer"};
+    }
+    
+    // 3. Expiration check
+    int64_t currentTime = millis() / 1000; // Unix timestamp (seconds)
+    if (currentTime < accountCheck.account.expiresAt) {
+        Serial.println("❌ Escrow has not expired yet!");
+        Serial.printf("   Time left: %lld seconds\n",
+                     accountCheck.account.expiresAt - currentTime);
+        return {false, "", "Escrow has not expired yet"};
+    }
+
+    // 4. Build instruction data
+    std::vector<uint8_t> instructionData = calculateDiscriminator("cancel_escrow");
+
+    // 5. Build instruction (Rust order: escrow, buyer)
+    Instruction ix(
+        program,
+        {
+            AccountMeta::writable(escrowPda, false), // escrow (writable, not signer)
+            AccountMeta::writable(buyer, true)       // buyer (writable, signer)
+        },
+        instructionData
+    );
+
+    // 6. Build and send the transaction
+    String blockhash = getLatestBlockhash();
+    if (blockhash.isEmpty()) return {false, "", "Failed to get blockhash"};
+
+    Transaction tx;
+    tx.fee_payer = buyer;
+    tx.recent_blockhash = blockhash;
+    tx.add(ix);
+    tx.sign({buyerKeypair});
+
+    String txSignature;
+    String txBase64 = tx.serializeBase64();
+    
+    Serial.println("📤 Sending transaction...");
+    
+    if (!sendRawTransaction(txBase64, txSignature)) {
+        return {false, "", "sendRawTransaction failed"};
+    }
+
+    Serial.println("✅ Escrow cancelled: " + txSignature);
+    
+    if (!confirmTransaction(txSignature, 15000)) {
+        return {true, txSignature, "Transaction sent but not confirmed"};
+    }
+    
+    Serial.println("✅ Funds refunded to the buyer!");
+    return {true, txSignature, ""};
+}
+
+
+// ============================================================================
+// ESCROW INITIATE DISPUTE
+// ============================================================================
+
+EscrowTxResult Infratic::escrow_initiateDispute(
+    const String &sellerPrivateKeyBase58,
+    const String &sellerPubkeyBase58,
+    const String &escrowPdaBase58,
+    const String &reason,
+    const String &evidence
+) {
+    Serial.println("\n=== 5. Initiate Dispute (FIXED) ===");
+
+    if (_escrowProgramId.isEmpty()) {
+        Serial.println("❌ Error: Escrow Program ID is not set.");
+        return {false, "", "Program ID not set"};
+    }
+
+    // 1. Private key decode
+    uint8_t privateKey[128];
+    size_t privLen = sizeof(privateKey);
+    if (!base58Decode(sellerPrivateKeyBase58, privateKey, privLen) || privLen < 64) {
+        return {false, "", "Invalid seller private key"};
+    }
+    
+    Keypair sellerKeypair = Keypair::fromPrivateKey(privateKey);
+    Pubkey seller = Pubkey::fromBase58(sellerPubkeyBase58);
+    Pubkey escrowPda = Pubkey::fromBase58(escrowPdaBase58);
+    Pubkey program = Pubkey::fromBase58(_escrowProgramId);
+
+    // 2. Check the escrow state
+    Serial.println("📋 Checking escrow state...");
+    EscrowAccountResult accountCheck = getEscrowAccount(escrowPdaBase58, "confirmed");
+    
+    if (!accountCheck.success) {
+        Serial.println("❌ Could not read escrow account!");
+        return {false, "", "Failed to read escrow account"};
+    }
+    
+    if (accountCheck.account.status != EscrowStatus::Active) {
+        Serial.println("❌ Escrow is not active!");
+        return {false, "", "Escrow is not active"};
+    }
+    
+    if (accountCheck.account.seller != sellerPubkeyBase58) {
+        Serial.println("❌ Unauthorized! You are not the seller.");
+        return {false, "", "Unauthorized: not the seller"};
+    }
+
+    // 3. Build instruction data
+    std::vector<uint8_t> instructionData = calculateDiscriminator("initiate_dispute");
+    serializeAnchorString(instructionData, reason);
+    serializeAnchorString(instructionData, evidence);
+
+    Serial.printf("📦 Instruction size: %d bytes\n", instructionData.size());
+
+    // 4. Build instruction (Rust order: escrow, seller)
+    Instruction ix(
+        program,
+        {
+            AccountMeta::writable(escrowPda, false), // escrow (writable, not signer)
+            AccountMeta::signer(seller)              // seller (signer)
+        },
+        instructionData
+    );
+
+    // 5. Build and send the transaction
+    String blockhash = getLatestBlockhash();
+    if (blockhash.isEmpty()) return {false, "", "Failed to get blockhash"};
+
+    Transaction tx;
+    tx.fee_payer = seller;
+    tx.recent_blockhash = blockhash;
+    tx.add(ix);
+    tx.sign({sellerKeypair});
+
+    String txSignature;
+    String txBase64 = tx.serializeBase64();
+    
+    Serial.println("📤 Sending transaction...");
+    
+    if (!sendRawTransaction(txBase64, txSignature)) {
+        return {false, "", "sendRawTransaction failed"};
+    }
+
+    Serial.println("✅ Dispute initiated: " + txSignature);
+    
+    if (!confirmTransaction(txSignature, 15000)) {
+        return {true, txSignature, "Transaction sent but not confirmed"};
+    }
+    
+    Serial.println("✅ Dispute recorded!");
+    return {true, txSignature, ""};
+}
+
+
+// ============================================================================
+// ESCROW FORCE CLOSE
+// ============================================================================
+
+EscrowTxResult Infratic::escrow_forceClose(
+    const String &authorityPrivateKeyBase58,
+    const String &authorityPubkeyBase58,
+    const String &buyerPubkeyBase58,
+    const String &escrowPdaBase58
+) {
+    Serial.println("\n=== 6. Force Close Escrow (FIXED) ===");
+    
+    if (_escrowProgramId.isEmpty()) {
+        Serial.println("❌ Error: Escrow Program ID is not set.");
+        return {false, "", "Program ID not set"};
+    }
+
+    // 1. Private key decode
+    uint8_t privateKey[128];
+    size_t privLen = sizeof(privateKey);
+    if (!base58Decode(authorityPrivateKeyBase58, privateKey, privLen) || privLen < 64) {
+        return {false, "", "Invalid authority private key"};
+    }
+    
+    Keypair authorityKeypair = Keypair::fromPrivateKey(privateKey);
+    Pubkey authority = Pubkey::fromBase58(authorityPubkeyBase58);
+    Pubkey buyer = Pubkey::fromBase58(buyerPubkeyBase58);
+    Pubkey escrowPda = Pubkey::fromBase58(escrowPdaBase58);
+    Pubkey program = Pubkey::fromBase58(_escrowProgramId);
+
+    // 2. Build instruction data
+    std::vector<uint8_t> instructionData = calculateDiscriminator("force_close_escrow");
+
+    // 3. Build instruction (Rust order: escrow, buyer, authority)
+    Instruction ix(
+        program,
+        {
+            AccountMeta::writable(escrowPda, false), // escrow (writable, not signer)
+            AccountMeta::writable(buyer, false),     // buyer (writable, not signer)
+            AccountMeta::signer(authority)           // authority (signer)
+        },
+        instructionData
+    );
+
+    // 4. Build and send the transaction
+    String blockhash = getLatestBlockhash();
+    if (blockhash.isEmpty()) return {false, "", "Failed to get blockhash"};
+
+    Transaction tx;
+    tx.fee_payer = authority;
+    tx.recent_blockhash = blockhash;
+    tx.add(ix);
+    tx.sign({authorityKeypair});
+
+    String txSignature;
+    String txBase64 = tx.serializeBase64();
+    
+    Serial.println("📤 Sending transaction...");
+    
+    if (!sendRawTransaction(txBase64, txSignature)) {
+        return {false, "", "sendRawTransaction failed"};
+    }
+
+    Serial.println("✅ Escrow force closed: " + txSignature);
+    
+    if (!confirmTransaction(txSignature, 15000)) {
+        return {true, txSignature, "Transaction sent but not confirmed"};
+    }
+    
+    Serial.println("🚨 Emergency! Escrow closed, funds refunded to the buyer.");
+    return {true, txSignature, ""};
 }
