@@ -15,7 +15,7 @@ fetch arduinolibs https://github.com/rweather/arduinolibs.git
 
 CRYPTO="$DEPS/arduinolibs/libraries/Crypto"
 MBED="$DEPS/mbedtls"
-CXXFLAGS="-std=gnu++17 -O1 -g -Wall -Wno-unused-function -Wno-sign-compare -Wno-format -ffunction-sections -fdata-sections \
+CXXFLAGS="-std=${CXXSTD:-gnu++17} -O1 -g -Wall -Wno-unused-function -Wno-sign-compare -Wno-format -ffunction-sections -fdata-sections \
   -DARDUINO=10819 -DARDUINOJSON_ENABLE_ARDUINO_STREAM=0 -DARDUINOJSON_ENABLE_ARDUINO_PRINT=0 \
   -DARDUINOJSON_ENABLE_PROGMEM=0 -DARDUINOJSON_ENABLE_ARDUINO_STRING=1 -DARDUINOJSON_ENABLE_STD_STRING=1 \
   -I$HERE/stubs -I$LIB/src -I$DEPS/ArduinoJson/src -I$MBED/include -I$CRYPTO"

@@ -2935,7 +2935,9 @@ namespace
     {
         const std::vector<uint8_t> &buf;
         size_t pos;
-        bool ok = true;
+        bool ok;
+
+        BorshReader(const std::vector<uint8_t> &data, size_t start) : buf(data), pos(start), ok(true) {}
 
         bool need(size_t n)
         {
