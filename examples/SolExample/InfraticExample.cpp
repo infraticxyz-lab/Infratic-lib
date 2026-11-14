@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include "Infratic-lib.h"
+#include "zk_examples.h"
 
 // ============================================================================
 // CONFIGURATION
@@ -20,6 +21,8 @@ const String PROGRAM_ID_BASE58 = "YOUR_PROGRAM_ID_BASE58";
 const String TOKEN_MINT_BASE58 = "Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr";
 
 Infratic solana(SOLANA_RPC_URL);
+
+void runZKProofExamples();
 
 // ============================================================================
 // BLOCKCHAIN QUERY EXAMPLES
@@ -887,19 +890,22 @@ void runZKProofExamples()
 
     example_zkBatchCommitments();
 
-    example_data_commitment(solana, PRIVATE_KEY, PUBLIC_KEY, "temp:25.7C", "device_secret");
+    std::vector<String> sensorReadings = {"temp:25.1C", "temp:25.4C", "temp:25.9C", "temp:26.2C"};
+    std::vector<String> readingsList = {"hum:41%", "hum:43%", "hum:44%"};
+
+    example_data_commitment(solana, PRIVATE_KEY_BASE58, PUBLIC_KEY_BASE58, "temp:25.7C", "device_secret");
     delay(3000);
 
-    example_merkle_tree_proof(solana, PRIVATE_KEY, PUBLIC_KEY, sensorReadings, 0);
+    example_merkle_tree_proof(solana, PRIVATE_KEY_BASE58, PUBLIC_KEY_BASE58, sensorReadings, 0);
     delay(3000);
 
-    example_range_proof(solana, PRIVATE_KEY, PUBLIC_KEY, 257, 200, 300, "secret");
+    example_range_proof(solana, PRIVATE_KEY_BASE58, PUBLIC_KEY_BASE58, 257, 200, 300, "secret");
     delay(3000);
 
-    example_timestamped_proof(solana, PRIVATE_KEY, PUBLIC_KEY, "lat:41.0082N,lon:28.9784E");
+    example_timestamped_proof(solana, PRIVATE_KEY_BASE58, PUBLIC_KEY_BASE58, "lat:41.0082N,lon:28.9784E");
     delay(3000);
 
-    example_batch_commitments(solana, PRIVATE_KEY, PUBLIC_KEY, readingsList, "batch_secret");
+    example_batch_commitments(solana, PRIVATE_KEY_BASE58, PUBLIC_KEY_BASE58, readingsList, "batch_secret");
 
     Serial.println("\n╔════════════════════════════════════════════╗");
     Serial.println("║  All ZK Examples Completed                  ║");
