@@ -146,6 +146,15 @@ struct zkSNARKProof
     bool isValid;
 };
 
+// ============================================================================
+// X402 ESCROW STRUCTURES
+// ============================================================================
+
+// Escrow account size on chain: 8 + 32 + 32 + 8 + (4+64) + 1 + 8 + 8 + 1 + 1 + 1 + (4+128)
+static const size_t ESCROW_ACCOUNT_SPACE = 300;
+static const size_t ESCROW_ORDER_ID_MAX = 64;
+static const size_t ESCROW_PROOF_HASH_MAX = 128;
+
 // Escrow Status Enum
 enum class EscrowStatus : uint8_t
 {
@@ -159,17 +168,17 @@ enum class EscrowStatus : uint8_t
 // Escrow account (data read from the chain)
 struct EscrowAccount
 {
-    String buyer;           // Buyer pubkey (base58)
-    String seller;          // Seller pubkey (base58)
-    uint64_t amount;        // Escrow amount (lamports)
-    String orderId;         // Order ID (max 64 chars)
-    EscrowStatus status;    // Escrow status
-    int64_t createdAt;      // Creation time
-    int64_t expiresAt;      // Expiration time
-    uint8_t bump;           // PDA bump seed
-    bool deliveryConfirmed; // Delivery confirmed
-    bool disputeInitiated;  // Dispute state
-    String proofHash;       // Delivery proof hash
+    String buyer;                               // Buyer pubkey (base58)
+    String seller;                              // Seller pubkey (base58)
+    uint64_t amount = 0;                        // Escrow amount (lamports)
+    String orderId;                             // Order ID (max 64 chars)
+    EscrowStatus status = EscrowStatus::Active; // Escrow status
+    int64_t createdAt = 0;                      // Creation time (unix)
+    int64_t expiresAt = 0;                      // Expiration time (unix)
+    uint8_t bump = 0;                           // PDA bump seed
+    bool deliveryConfirmed = false;             // Delivery confirmed
+    bool disputeInitiated = false;              // Dispute state
+    String proofHash;                           // Delivery proof hash
 };
 
 // Function results
@@ -758,6 +767,13 @@ public:
     // ============================================================================
 
     /**
+     * @brief Derives the escrow PDA (seeds: "escrow", order_id, buyer)
+     * @param orderId Order ID (max 32 bytes because it is a PDA seed)
+     * @param buyerPubkeyBase58 Buyer address
+     */
+    bool deriveEscrowPDA(const String &orderId, const String &buyerPubkeyBase58,
+                         String &outPDA, uint8_t &outBump);
+
     /**
      * @brief Reads the current state of an escrow account.
      * @param escrowPdaBase58 Address of the escrow account.
@@ -843,27 +859,9 @@ private:
                                      String &outTxBase64);
 
     String _escrowProgramId; // escrow program ID set at runtime
-    Pubkey SYSTEM_PROGRAM_ID = Pubkey::fromBase58("11111111111111111111111111111111");
 
-    
-
-    // Anchor string (u32 length + data) serialization
-    void serializeAnchorString(std::vector<uint8_t> &buffer, const String &str);
-
-    /**
-     * @brief Fetches raw account data (base64).
-     * @param accountBase58 Account address.
-     * @param outBase64Data Output (base64 data).
-     * @param commitment "finalized" (default) or "confirmed" (faster).
-     */
-    bool getAccountInfo(const String &accountBase58, String &outBase64Data, const String &commitment = "finalized");
-
-    // Deserialization helpers
+    // Escrow account (Anchor/Borsh) decoding
     bool deserializeEscrowAccount(const std::vector<uint8_t> &data, EscrowAccount &outAccount);
-    uint32_t decodeU32LE(const uint8_t *buffer);
-    uint64_t decodeU64LE(const uint8_t *buffer);
-    int64_t decodeI64LE(const uint8_t *buffer);
-    String decodeAnchorString(const uint8_t *buffer, size_t &offset, size_t max_len);
 };
 
 #endif // INFRATIC_LIB_H

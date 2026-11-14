@@ -2860,145 +2860,64 @@ bool Infratic::storeBatchInAnchor(
 
 
 // ============================================================================
-// PROGRAM ID SETTER
+// X402 ESCROW - SETUP & ACCOUNT READING
 // ============================================================================
 
-void Infratic::setEscrowProgramId(const String &programId) {
+void Infratic::setEscrowProgramId(const String &programId)
+{
     _escrowProgramId = programId;
     _logInfo.println("✅ Escrow Program ID set: " + _escrowProgramId);
 }
 
-// ============================================================================
-// NEW RPC & DESERIALIZATION HELPERS
-// ============================================================================
-
-// Little-endian decoders
-uint32_t Infratic::decodeU32LE(const uint8_t *buffer) {
-    return (uint32_t)buffer[0] | ((uint32_t)buffer[1] << 8) |
-           ((uint32_t)buffer[2] << 16) | ((uint32_t)buffer[3] << 24);
-}
-
-uint64_t Infratic::decodeU64LE(const uint8_t *buffer) {
-    return (uint64_t)decodeU32LE(buffer) | ((uint64_t)decodeU32LE(buffer + 4) << 32);
-}
-
-int64_t Infratic::decodeI64LE(const uint8_t *buffer) {
-    return (int64_t)decodeU64LE(buffer);
-}
-
-/**
- * @brief Decodes an Anchor [u32 len][data] string.
- * @param buffer Raw data buffer (must start AFTER the discriminator).
- * @param offset Current read offset, updated by the call.
- * @param max_len Max space reserved for the string (to skip padding).
- */
-String Infratic::decodeAnchorString(const uint8_t *buffer, size_t &offset, size_t max_len) {
-    uint32_t len = decodeU32LE(buffer + offset);
-    offset += 4; // skip the length field
-    
-    String str = "";
-    if (len > 0 && len <= max_len) {
-        str = String((char*)(buffer + offset), len);
-    }
-    
-    offset += max_len; // skip string data and remaining padding
-    return str;
-}
-
-
-// getAccountInfo
-
-// ============================================================================
-// RPC & DESERIALIZATION HELPERS
-// ============================================================================
-
-/**
- * @brief Fetches raw account data (base64).
- * @param commitment "finalized" (default) or "confirmed" (faster).
- */
-bool Infratic::getAccountInfo(const String &accountBase58, String &outBase64Data, const String &commitment) {
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-
-    if (!http.begin(client, _rpcUrl)) {
-        _logErr.println("❌ getAccountInfo: HTTP begin failed");
+bool Infratic::deriveEscrowPDA(const String &orderId, const String &buyerPubkeyBase58,
+                               String &outPDA, uint8_t &outBump)
+{
+    if (_escrowProgramId.isEmpty())
+    {
+        _logErr.println("❌ Error: Escrow Program ID is not set.");
         return false;
     }
 
-    // add "commitment" to the RPC params
-    String body = String(R"({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[")") +
-                  accountBase58 +
-                  R"(",{"encoding":"base64", "commitment":")" + commitment + R"("}]})";
-
-    http.addHeader("Content-Type", "application/json");
-    int code = http.POST(body);
-
-    if (code != 200) {
-        _logErr.printf("❌ getAccountInfo: HTTP code %d\n", code);
-        http.end();
+    Pubkey buyer = Pubkey::fromBase58(buyerPubkeyBase58);
+    if (buyer.data.size() != 32 || orderId.length() > 32)
+    {
+        _logErr.println("❌ Escrow PDA: invalid buyer or order_id longer than 32 bytes");
         return false;
     }
 
-    String response = http.getString();
-    http.end();
-
-    DynamicJsonDocument doc(4096); // data can be large
-    if (deserializeJson(doc, response) || doc["error"]) {
-        _logErr.println("❌ getAccountInfo: RPC error or JSON parse error");
-        return false;
-    }
-
-    JsonVariant data = doc["result"]["value"]["data"][0];
-    if (data.isNull() || !data.is<String>()) {
-        _logErr.println("❌ getAccountInfo: Account not found or data is null");
-        return false;
-    }
-
-    outBase64Data = data.as<String>();
-    return true;
+    std::vector<std::vector<uint8_t>> seeds = {
+        {'e', 's', 'c', 'r', 'o', 'w'},
+        std::vector<uint8_t>(orderId.begin(), orderId.end()),
+        buyer.data};
+    return derivePDA(seeds, _escrowProgramId, outPDA, outBump);
 }
 
-/**
- * @brief Reads the escrow account.
- *
- * @param commitment "finalized" (default) or "confirmed" (faster).
- */
-EscrowAccountResult Infratic::getEscrowAccount(const String &escrowPdaBase58, const String &commitment) {
+EscrowAccountResult Infratic::getEscrowAccount(const String &escrowPdaBase58, const String &commitment)
+{
     _logInfo.println("\n=== Get Escrow Account Info ===");
-    
-    if (_escrowProgramId.isEmpty()) {
+
+    if (_escrowProgramId.isEmpty())
+    {
         _logErr.println("❌ Error: Escrow Program ID is not set.");
         return {false, {}, "Program ID not set"};
     }
 
-    // 1. Fetch raw data (pass commitment through)
-    String base64Data;
-    if (!getAccountInfo(escrowPdaBase58, base64Data, commitment)) {
+    std::vector<uint8_t> data;
+    String owner;
+    if (!getAccountData(escrowPdaBase58, data, commitment, &owner))
+    {
         return {false, {}, "Failed to get account info (getAccountInfo fail)"};
     }
 
-    // 2. Decode base64 data
-    size_t decodedLen = 0;
-    size_t dataLen = base64Data.length();
-    
-    mbedtls_base64_decode(NULL, 0, &decodedLen, (const unsigned char*)base64Data.c_str(), dataLen);
-    
-    std::vector<uint8_t> decodedData(decodedLen);
-    
-    int ret = mbedtls_base64_decode(decodedData.data(), decodedData.size(), &decodedLen,
-                                    (const unsigned char*)base64Data.c_str(), dataLen);
-
-    if (ret != 0) {
-        _logErr.println("❌ Base64 decode error");
-        return {false, {}, "Base64 decode error"};
+    if (owner != _escrowProgramId)
+    {
+        _logErr.println("❌ Account is not owned by the escrow program: " + owner);
+        return {false, {}, "Account is not owned by escrow program"};
     }
-    
-    decodedData.resize(decodedLen); // shrink to real size
 
-    // 3. Deserialize the data
     EscrowAccount account;
-    if (!deserializeEscrowAccount(decodedData, account)) {
+    if (!deserializeEscrowAccount(data, account))
+    {
         return {false, {}, "Failed to decode account data (deserialize fail)"};
     }
 
@@ -3009,76 +2928,93 @@ EscrowAccountResult Infratic::getEscrowAccount(const String &escrowPdaBase58, co
     return {true, account, ""};
 }
 
-/**
- * @brief Converts raw account data into an EscrowAccount.
- */
-bool Infratic::deserializeEscrowAccount(const std::vector<uint8_t> &data, EscrowAccount &outAccount) {
-    // Anchor account data always starts with an 8 byte discriminator
-    const size_t ANCHOR_DISCRIMINATOR_SIZE = 8;
-    // Total size of the Rust struct (from InitSpace)
-    // 32+32+8 + (4+64) + 1+8+8+1+1+1 + (4+128) = 288 bytes
-    const size_t ESCROW_ACCOUNT_DATA_SIZE = 288;
+namespace
+{
+    // Sequential little-endian / Borsh reader with bounds checks
+    struct BorshReader
+    {
+        const std::vector<uint8_t> &buf;
+        size_t pos;
+        bool ok = true;
 
-    if (data.size() < ANCHOR_DISCRIMINATOR_SIZE + ESCROW_ACCOUNT_DATA_SIZE) {
-        _logErr.printf("❌ Deserialize Error: data too short (expected: %d, got: %d)\n",
-            ANCHOR_DISCRIMINATOR_SIZE + ESCROW_ACCOUNT_DATA_SIZE, data.size());
+        bool need(size_t n)
+        {
+            if (pos + n > buf.size()) ok = false;
+            return ok;
+        }
+        uint8_t u8()
+        {
+            return need(1) ? buf[pos++] : 0;
+        }
+        uint64_t u64()
+        {
+            if (!need(8)) return 0;
+            uint64_t v = 0;
+            for (int i = 0; i < 8; i++) v |= (uint64_t)buf[pos + i] << (8 * i);
+            pos += 8;
+            return v;
+        }
+        uint32_t u32()
+        {
+            if (!need(4)) return 0;
+            uint32_t v = 0;
+            for (int i = 0; i < 4; i++) v |= (uint32_t)buf[pos + i] << (8 * i);
+            pos += 4;
+            return v;
+        }
+        String pubkey()
+        {
+            if (!need(32)) return "";
+            String s = base58Encode(buf.data() + pos, 32);
+            pos += 32;
+            return s;
+        }
+        // Borsh strings are NOT padded to max_len: u32 length + bytes, then next field
+        String str(size_t maxLen)
+        {
+            uint32_t len = u32();
+            if (!ok || len > maxLen || !need(len))
+            {
+                ok = false;
+                return "";
+            }
+            String s((const char *)buf.data() + pos, len);
+            pos += len;
+            return s;
+        }
+    };
+}
+
+bool Infratic::deserializeEscrowAccount(const std::vector<uint8_t> &data, EscrowAccount &outAccount)
+{
+    // 8 byte Anchor discriminator + fields in Rust struct order
+    const size_t ANCHOR_DISCRIMINATOR_SIZE = 8;
+    if (data.size() < ANCHOR_DISCRIMINATOR_SIZE)
+    {
+        _logErr.println("❌ Deserialize Error: data too short");
         return false;
     }
-    
-    // Point the buffer after the discriminator
-    const uint8_t *buffer = data.data() + ANCHOR_DISCRIMINATOR_SIZE;
-    size_t offset = 0;
 
-    // Read in Rust struct order:
-    outAccount.buyer = base58Encode(buffer + offset, 32);
-    offset += 32;
+    BorshReader r{data, ANCHOR_DISCRIMINATOR_SIZE};
+    outAccount.buyer = r.pubkey();
+    outAccount.seller = r.pubkey();
+    outAccount.amount = r.u64();
+    outAccount.orderId = r.str(ESCROW_ORDER_ID_MAX);
+    outAccount.status = (EscrowStatus)r.u8();
+    outAccount.createdAt = (int64_t)r.u64();
+    outAccount.expiresAt = (int64_t)r.u64();
+    outAccount.bump = r.u8();
+    outAccount.deliveryConfirmed = r.u8() != 0;
+    outAccount.disputeInitiated = r.u8() != 0;
+    outAccount.proofHash = r.str(ESCROW_PROOF_HASH_MAX);
 
-    outAccount.seller = base58Encode(buffer + offset, 32);
-    offset += 32;
-
-    outAccount.amount = decodeU64LE(buffer + offset);
-    offset += 8;
-
-    outAccount.orderId = decodeAnchorString(buffer, offset, 64); // max_len = 64
-
-    outAccount.status = (EscrowStatus)buffer[offset];
-    offset += 1;
-
-    outAccount.createdAt = decodeI64LE(buffer + offset);
-    offset += 8;
-
-    outAccount.expiresAt = decodeI64LE(buffer + offset);
-    offset += 8;
-
-    outAccount.bump = buffer[offset];
-    offset += 1;
-
-    outAccount.deliveryConfirmed = (bool)buffer[offset];
-    offset += 1;
-
-    outAccount.disputeInitiated = (bool)buffer[offset];
-    offset += 1;
-    
-    outAccount.proofHash = decodeAnchorString(buffer, offset, 128); // max_len = 128
-    
+    if (!r.ok)
+    {
+        _logErr.printf("❌ Deserialize Error: invalid escrow data (size: %u)\n", (unsigned)data.size());
+        return false;
+    }
     return true;
 }
-
-
-// ============================================================================
-// HELPER IMPLEMENTATIONS
-// ============================================================================
-
-void Infratic::serializeAnchorString(std::vector<uint8_t> &buffer, const String &str) {
-    uint32_t len = str.length();
-    buffer.push_back(len & 0xFF);
-    buffer.push_back((len >> 8) & 0xFF);
-    buffer.push_back((len >> 16) & 0xFF);
-    buffer.push_back((len >> 24) & 0xFF);
-    buffer.insert(buffer.end(), str.begin(), str.end());
-}
-
-
 
 // ============================================================================
 // ESCROW CREATE
@@ -3092,7 +3028,7 @@ EscrowCreateResult Infratic::escrow_create(
     const String &order_id,
     int64_t expiration_duration
 ) {
-    _logInfo.println("\n=== 1. Create Escrow (FIXED) ===");
+    _logInfo.println("\n=== 1. Create Escrow ===");
 
     if (_escrowProgramId.isEmpty()) {
         _logErr.println("❌ Error: Escrow Program ID is not set.");
@@ -3112,16 +3048,16 @@ EscrowCreateResult Infratic::escrow_create(
     Pubkey seller = Pubkey::fromBase58(sellerPubkeyBase58);
     Pubkey program = Pubkey::fromBase58(_escrowProgramId);
 
-    // 2. PDA Derivation
-    std::vector<std::vector<uint8_t>> seeds = {
-        {'e', 's', 'c', 'r', 'o', 'w'},
-        std::vector<uint8_t>(order_id.begin(), order_id.end()),
-        buyer.data
-    };
-    
+    if (order_id.isEmpty() || order_id.length() > 32)
+    {
+        _logErr.println("❌ order_id must be 1-32 bytes (PDA seed limit)");
+        return {false, "", "", 0, "Invalid order_id length"};
+    }
+
+    // 2. PDA Derivation (seeds: "escrow", order_id, buyer)
     String pdaAddress;
     uint8_t bump;
-    if (!derivePDA(seeds, _escrowProgramId, pdaAddress, bump)) {
+    if (!deriveEscrowPDA(order_id, buyerPubkeyBase58, pdaAddress, bump)) {
         _logErr.println("❌ Failed to derive escrow PDA address");
         return {false, "", "", 0, "PDA derivation failed"};
     }
@@ -3130,17 +3066,18 @@ EscrowCreateResult Infratic::escrow_create(
     _logInfo.println("✅ PDA derived: " + pdaAddress);
     _logInfo.printf("   Bump: %d\n", bump);
 
-    // 3. Account size and rent
-    // Escrow struct size: 8 (discriminator) + 292 (data) = 300 bytes
-    const size_t ESCROW_ACCOUNT_SIZE = 300;
-    
-    // Rent estimate (Solana devnet)
-    // Approx: 19.055441478 lamports/byte * 300 bytes = ~5,716,632 lamports
-    const uint64_t RENT_LAMPORTS = 5800000; // ~0.0058 SOL (with safety margin)
-    
-    _logInfo.printf("💰 Rent: %llu lamports\n", RENT_LAMPORTS);
-    _logInfo.printf("💰 Transfer amount: %llu lamports\n", amount);
-    _logInfo.printf("💰 TOTAL: %llu lamports\n", RENT_LAMPORTS + amount);
+    // 3. Rent: escrow account is 300 bytes (8 discriminator + 292 data)
+    uint64_t RENT_LAMPORTS = 0;
+    if (!getMinimumBalanceForRentExemption(ESCROW_ACCOUNT_SPACE, RENT_LAMPORTS))
+    {
+        RENT_LAMPORTS = 3000000; // estimate when RPC fails (~0.00298 SOL for 300 bytes)
+        _logErr.println("⚠️  Could not get rent from RPC, using an estimate");
+    }
+    const uint64_t TX_FEE_LAMPORTS = 5000;
+
+    _logInfo.printf("💰 Rent: %llu lamports\n", (unsigned long long)RENT_LAMPORTS);
+    _logInfo.printf("💰 Transfer amount: %llu lamports\n", (unsigned long long)amount);
+    _logInfo.printf("💰 TOTAL: %llu lamports\n", (unsigned long long)(RENT_LAMPORTS + amount + TX_FEE_LAMPORTS));
 
     // 4. Check that the buyer has enough balance
     uint64_t buyerBalance = 0;
@@ -3148,10 +3085,10 @@ EscrowCreateResult Infratic::escrow_create(
         return {false, pdaAddress, "", bump, "Failed to get buyer balance"};
     }
     
-    uint64_t totalRequired = RENT_LAMPORTS + amount;
+    uint64_t totalRequired = RENT_LAMPORTS + amount + TX_FEE_LAMPORTS;
     if (buyerBalance < totalRequired) {
         _logErr.printf("❌ Insufficient balance! Required: %llu, Available: %llu\n",
-                     totalRequired, buyerBalance);
+                       (unsigned long long)totalRequired, (unsigned long long)buyerBalance);
         return {false, pdaAddress, "", bump, "Insufficient buyer balance"};
     }
 
@@ -3163,7 +3100,7 @@ EscrowCreateResult Infratic::escrow_create(
     instructionData.insert(instructionData.end(), amountBytes.begin(), amountBytes.end());
     
     // order_id (Anchor String: u32 length + data)
-    serializeAnchorString(instructionData, order_id);
+    appendBorshString(instructionData, order_id);
     
     // expiration (i64, little-endian)
     std::vector<uint8_t> expBytes = encodeI64LE(expiration_duration);
@@ -3172,9 +3109,9 @@ EscrowCreateResult Infratic::escrow_create(
     // bump (u8)
     instructionData.push_back(bump);
 
-    _logInfo.printf("📦 Instruction size: %d bytes\n", instructionData.size());
+    _logInfo.printf("📦 Instruction size: %u bytes\n", (unsigned)instructionData.size());
 
-    // 6. Account order must match the program
+    // 6. Account order (must match the Rust program)
     // Order in the Rust program: escrow, buyer, seller, system_program
     Instruction ix(
         program,
@@ -3182,7 +3119,7 @@ EscrowCreateResult Infratic::escrow_create(
             AccountMeta::writable(escrowPda, false),  // escrow (writable, not signer)
             AccountMeta::writable(buyer, true),        // buyer (writable, signer)
             AccountMeta{seller, false, false},         // seller (readonly, not signer)
-            AccountMeta{SYSTEM_PROGRAM_ID, false, false} // system_program
+            AccountMeta{Pubkey::fromBase58(SYSTEM_PROGRAM_B58), false, false} // system_program
         },
         instructionData
     );
@@ -3232,7 +3169,7 @@ EscrowTxResult Infratic::escrow_confirmDelivery(
     const String &escrowPdaBase58,
     const String &proof_hash
 ) {
-    _logInfo.println("\n=== 2. Confirm Delivery (FIXED) ===");
+    _logInfo.println("\n=== 2. Confirm Delivery ===");
     
     if (_escrowProgramId.isEmpty()) {
         _logErr.println("❌ Error: Escrow Program ID is not set.");
@@ -3271,10 +3208,16 @@ EscrowTxResult Infratic::escrow_confirmDelivery(
     }
 
     // 3. Build instruction data
-    std::vector<uint8_t> instructionData = calculateDiscriminator("confirm_delivery");
-    serializeAnchorString(instructionData, proof_hash);
+    if (proof_hash.length() > ESCROW_PROOF_HASH_MAX)
+    {
+        _logErr.println("❌ proof_hash can be at most 128 bytes");
+        return {false, "", "proof_hash too long"};
+    }
 
-    _logInfo.printf("📦 Instruction size: %d bytes\n", instructionData.size());
+    std::vector<uint8_t> instructionData = calculateDiscriminator("confirm_delivery");
+    appendBorshString(instructionData, proof_hash);
+
+    _logInfo.printf("📦 Instruction size: %u bytes\n", (unsigned)instructionData.size());
 
     // 4. Build instruction (Rust order: escrow, seller)
     Instruction ix(
@@ -3326,7 +3269,7 @@ EscrowTxResult Infratic::escrow_release(
     const String &sellerPubkeyBase58,
     const String &escrowPdaBase58
 ) {
-    _logInfo.println("\n=== 3. Release Escrow (FIXED) ===");
+    _logInfo.println("\n=== 3. Release Escrow ===");
     
     if (_escrowProgramId.isEmpty()) {
         _logErr.println("❌ Error: Escrow Program ID is not set.");
@@ -3423,7 +3366,7 @@ EscrowTxResult Infratic::escrow_cancel(
     const String &buyerPubkeyBase58,
     const String &escrowPdaBase58
 ) {
-    _logInfo.println("\n=== 4. Cancel Escrow (FIXED) ===");
+    _logInfo.println("\n=== 4. Cancel Escrow ===");
 
     if (_escrowProgramId.isEmpty()) {
         _logErr.println("❌ Error: Escrow Program ID is not set.");
@@ -3461,13 +3404,21 @@ EscrowTxResult Infratic::escrow_cancel(
         return {false, "", "Unauthorized: not the buyer"};
     }
     
-    // 3. Expiration check
-    int64_t currentTime = millis() / 1000; // Unix timestamp (seconds)
-    if (currentTime < accountCheck.account.expiresAt) {
-        _logErr.println("❌ Escrow has not expired yet!");
-        _logInfo.printf("   Time left: %lld seconds\n",
-                     accountCheck.account.expiresAt - currentTime);
-        return {false, "", "Escrow has not expired yet"};
+    // 3. Expiration check (uses cluster time; millis() is not unix time)
+    int64_t currentTime = 0;
+    if (getClusterTime(currentTime))
+    {
+        if (currentTime < accountCheck.account.expiresAt)
+        {
+            _logErr.println("❌ Escrow has not expired yet!");
+            _logInfo.printf("   Time left: %lld seconds\n",
+                            (long long)(accountCheck.account.expiresAt - currentTime));
+            return {false, "", "Escrow has not expired yet"};
+        }
+    }
+    else
+    {
+        _logErr.println("⚠️  Could not get cluster time, the program will check expiration");
     }
 
     // 4. Build instruction data
@@ -3524,7 +3475,7 @@ EscrowTxResult Infratic::escrow_initiateDispute(
     const String &reason,
     const String &evidence
 ) {
-    _logInfo.println("\n=== 5. Initiate Dispute (FIXED) ===");
+    _logInfo.println("\n=== 5. Initiate Dispute ===");
 
     if (_escrowProgramId.isEmpty()) {
         _logErr.println("❌ Error: Escrow Program ID is not set.");
@@ -3564,10 +3515,10 @@ EscrowTxResult Infratic::escrow_initiateDispute(
 
     // 3. Build instruction data
     std::vector<uint8_t> instructionData = calculateDiscriminator("initiate_dispute");
-    serializeAnchorString(instructionData, reason);
-    serializeAnchorString(instructionData, evidence);
+    appendBorshString(instructionData, reason);
+    appendBorshString(instructionData, evidence);
 
-    _logInfo.printf("📦 Instruction size: %d bytes\n", instructionData.size());
+    _logInfo.printf("📦 Instruction size: %u bytes\n", (unsigned)instructionData.size());
 
     // 4. Build instruction (Rust order: escrow, seller)
     Instruction ix(
@@ -3619,7 +3570,7 @@ EscrowTxResult Infratic::escrow_forceClose(
     const String &buyerPubkeyBase58,
     const String &escrowPdaBase58
 ) {
-    _logInfo.println("\n=== 6. Force Close Escrow (FIXED) ===");
+    _logInfo.println("\n=== 6. Force Close Escrow ===");
     
     if (_escrowProgramId.isEmpty()) {
         _logErr.println("❌ Error: Escrow Program ID is not set.");
