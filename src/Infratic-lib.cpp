@@ -844,6 +844,26 @@ size_t infratic_detail::jsonCapacity(const String &response)
     return response.length() + response.length() / 2 + 1024;
 }
 
+String infratic_detail::filtersJson(const std::vector<AccountFilter> &filters)
+{
+    String json = "[";
+    for (size_t i = 0; i < filters.size(); i++)
+    {
+        const AccountFilter &f = filters[i];
+        if (i) json += ",";
+        if (f.isMemcmp)
+        {
+            json += R"({"memcmp":{"offset":)" + String((unsigned long)f.offset) + R"(,"bytes":")" +
+                    base58Encode(f.bytes.data(), f.bytes.size()) + "\"}}";
+        }
+        else
+        {
+            json += R"({"dataSize":)" + String((unsigned long)f.size) + "}";
+        }
+    }
+    return json + "]";
+}
+
 AccountFilter AccountFilter::dataSize(size_t size)
 {
     AccountFilter f;
@@ -940,22 +960,7 @@ bool Infratic::getProgramAccounts(const String &programIdBase58, const std::vect
     String params = "[\"" + programIdBase58 + R"(",{"encoding":"base64","commitment":")" + commitment + "\"";
     if (!filters.empty())
     {
-        params += ",\"filters\":[";
-        for (size_t i = 0; i < filters.size(); i++)
-        {
-            const AccountFilter &f = filters[i];
-            if (i) params += ",";
-            if (f.isMemcmp)
-            {
-                params += R"({"memcmp":{"offset":)" + String((unsigned long)f.offset) + R"(,"bytes":")" +
-                          base58Encode(f.bytes.data(), f.bytes.size()) + "\"}}";
-            }
-            else
-            {
-                params += R"({"dataSize":)" + String((unsigned long)f.size) + "}";
-            }
-        }
-        params += "]";
+        params += ",\"filters\":" + infratic_detail::filtersJson(filters);
     }
     params += "}]";
 

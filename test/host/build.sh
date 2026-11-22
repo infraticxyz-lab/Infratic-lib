@@ -24,7 +24,7 @@ objs=()
 cc_c() { local o="$OUT/$(basename "$1").o"; [ "$o" -nt "$1" ] || gcc -O1 -ffunction-sections -fdata-sections -I$MBED/include -c "$1" -o "$o"; objs+=("$o"); }
 cc_x() { local o="$OUT/$(basename "$1").o"; g++ $CXXFLAGS ${2:-} -c "$1" -o "$o"; objs+=("$o"); }
 
-for f in sha256 sha512 base64 platform_util constant_time; do cc_c "$MBED/library/$f.c"; done
+for f in sha256 sha512 sha1 base64 platform_util constant_time; do cc_c "$MBED/library/$f.c"; done
 for f in Ed25519 SHA512 Hash BigNumberUtil Curve25519 Crypto; do cc_x "$CRYPTO/$f.cpp" "-w"; done
 cc_x "$HERE/stubs/runtime.cpp"
 cc_x "$LIB/src/base58.cpp"

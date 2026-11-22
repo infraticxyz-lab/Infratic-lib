@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <cctype>
 #include "WString.h"
 
 #ifndef ESP32

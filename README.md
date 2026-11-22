@@ -34,7 +34,8 @@
 - ✅ Custom instructions, multi-instruction and multi-signer transactions
 - ✅ x402 escrow client (create, confirm delivery, release, cancel, dispute, force close)
 
-### 📡 RPC
+### 📡 RPC & Subscriptions
+- ✅ WebSocket subscriptions: account, program (with filters), logs and signature notifications
 - ✅ Blockchain queries (block height, epoch info, latest blockhash, cluster time)
 - ✅ Generic `rpcCall()` for any JSON-RPC method
 - ✅ `getAccountData`, `getProgramAccounts` (with `dataSize` / `memcmp` filters), `getSignaturesForAddress`
@@ -190,6 +191,30 @@ if (solana.estimatePriorityFee({}, fee, 75)) {   // 75th percentile of recent sl
 ```
 
 For your own transactions call `solana.applyPriorityFee(tx)` before signing, or add `Infratic::setComputeUnitLimitIx` / `setComputeUnitPriceIx` yourself.
+
+---
+
+## 📡 WebSocket Subscriptions
+
+Get notified the moment something changes instead of polling every few seconds.
+
+```cpp
+solana.onProgramAccountChange([](int handle, const String &pubkey, const std::vector<uint8_t> &data, uint64_t slot) {
+    Serial.println("account changed: " + pubkey);
+});
+solana.onLogs([](int handle, const String &sig, const std::vector<String> &logs, bool failed, uint64_t slot) {
+    Serial.println("tx: " + sig);
+});
+
+solana.programSubscribe(PROGRAM_ID, {AccountFilter::dataSize(622)});
+solana.logsSubscribe(PROGRAM_ID);
+
+void loop() {
+    solana.wsLoop();   // reads messages, runs callbacks, pings, reconnects
+}
+```
+
+The WebSocket URL is derived from the RPC URL (`https://` → `wss://`), or set it with `setWsUrl`. After a reconnect all subscriptions are restored and keep their handles. Messages larger than `setWsMaxMessageSize` (default 64 KB) are rejected to protect RAM.
 
 ---
 

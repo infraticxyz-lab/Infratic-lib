@@ -34,6 +34,7 @@ public:
     char *end() { return &s[0] + s.size(); }
     const char *begin() const { return s.data(); }
     const char *end() const { return s.data() + s.size(); }
+    void setCharAt(unsigned i, char c) { if (i < s.size()) s[i] = c; }
     char charAt(unsigned i) const { return i < s.size() ? s[i] : 0; }
     char operator[](unsigned i) const { return charAt(i); }
     String substring(unsigned from) const { return from >= s.size() ? String() : String(s.substr(from)); }

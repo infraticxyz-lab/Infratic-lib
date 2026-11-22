@@ -9,6 +9,9 @@
 #include "Infratic-lib.h"
 #include "infratic_internal.h"
 #include <mbedtls/base64.h>
+#include <mbedtls/sha1.h>
+#include <WiFiClient.h>
+#include <deque>
 
 #ifndef INFRATIC_VERSION
 Infratic solana("https://mock.rpc"); // old lib needs this global
@@ -510,6 +513,188 @@ static void testSendReliability(Infratic &sol)
     }
 }
 
+// Minimal WebSocket server side for the client tests.
+struct MockWsServer : MockSocket
+{
+    bool up = false, handshakeDone = false, allMasked = true;
+    std::string host, requestLine;
+    uint16_t port = 0;
+    int connects = 0, pongs = 0, nextServerId = 1001;
+    std::vector<uint8_t> in;
+    std::deque<uint8_t> out;
+    std::vector<std::string> requests;
+    std::string lastPongPayload;
+
+    bool connect(const std::string &h, uint16_t p) override { host = h; port = p; up = true; handshakeDone = false; in.clear(); out.clear(); connects++; return true; }
+    bool connected() override { return up || !out.empty(); }
+    void stop() override { up = false; }
+    int available() override { return (int)out.size(); }
+    int read(uint8_t *buf, size_t len) override
+    {
+        size_t n = std::min(len, out.size());
+        for (size_t i = 0; i < n; i++) { buf[i] = out.front(); out.pop_front(); }
+        return (int)n;
+    }
+    void pushRaw(const std::vector<uint8_t> &b) { out.insert(out.end(), b.begin(), b.end()); }
+    void pushFrame(uint8_t first, const std::string &payload)
+    {
+        std::vector<uint8_t> f = {first};
+        size_t len = payload.size();
+        if (len < 126) f.push_back((uint8_t)len);
+        else if (len <= 0xFFFF) { f.push_back(126); f.push_back(len >> 8); f.push_back(len & 0xFF); }
+        else { f.push_back(127); for (int i = 7; i >= 0; i--) f.push_back(((uint64_t)len >> (8 * i)) & 0xFF); }
+        f.insert(f.end(), payload.begin(), payload.end());
+        pushRaw(f);
+    }
+    void pushText(const std::string &json, size_t fragment = 0)
+    {
+        if (!fragment || fragment >= json.size()) { pushFrame(0x81, json); return; }
+        for (size_t off = 0; off < json.size(); off += fragment)
+        {
+            bool first = off == 0, last = off + fragment >= json.size();
+            pushFrame((last ? 0x80 : 0x00) | (first ? 0x1 : 0x0), json.substr(off, fragment));
+        }
+    }
+    size_t write(const uint8_t *buf, size_t len) override
+    {
+        in.insert(in.end(), buf, buf + len);
+        if (!handshakeDone)
+        {
+            std::string req(in.begin(), in.end());
+            size_t end = req.find("\r\n\r\n");
+            if (end == std::string::npos) return len;
+            requestLine = req.substr(0, req.find("\r\n"));
+            size_t k = req.find("Sec-WebSocket-Key: ");
+            std::string key = req.substr(k + 19, req.find("\r\n", k) - k - 19) + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+            unsigned char d[20]; mbedtls_sha1_ret((const unsigned char *)key.data(), key.size(), d);
+            unsigned char acc[64]; size_t al = 0; mbedtls_base64_encode(acc, sizeof acc, &al, d, 20);
+            std::string resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+                               std::string((char *)acc, al) + "\r\n\r\n";
+            pushRaw(std::vector<uint8_t>(resp.begin(), resp.end()));
+            in.erase(in.begin(), in.begin() + end + 4);
+            handshakeDone = true;
+        }
+        while (in.size() >= 2)
+        {
+            uint8_t op = in[0] & 0x0F; bool masked = in[1] & 0x80; uint64_t l = in[1] & 0x7F; size_t pos = 2;
+            if (l == 126) { if (in.size() < 4) break; l = (in[2] << 8) | in[3]; pos = 4; }
+            else if (l == 127) { if (in.size() < 10) break; l = 0; for (int i = 0; i < 8; i++) l = (l << 8) | in[2 + i]; pos = 10; }
+            if (!masked) allMasked = false;
+            if (in.size() < pos + 4 + l) break;
+            uint8_t m[4]; memcpy(m, in.data() + pos, 4); pos += 4;
+            std::string payload;
+            for (size_t i = 0; i < l; i++) payload += (char)(in[pos + i] ^ m[i & 3]);
+            in.erase(in.begin(), in.begin() + pos + l);
+            if (op == 0xA) { pongs++; lastPongPayload = payload; }
+            if (op == 0x1)
+            {
+                requests.push_back(payload);
+                DynamicJsonDocument d(4096); deserializeJson(d, payload);
+                std::string method = d["method"].as<std::string>(); int id = d["id"];
+                std::string result = method.find("Unsubscribe") != std::string::npos ? "true" : std::to_string(nextServerId++);
+                pushText("{\"jsonrpc\":\"2.0\",\"result\":" + result + ",\"id\":" + std::to_string(id) + "}");
+            }
+        }
+        return len;
+    }
+};
+
+static void testWebSocket(Infratic &sol)
+{
+    g_group = "websocket";
+    MockWsServer server;
+    g_mockSocket = &server;
+
+    sol.setWsUrl("wss://devnet.helius-rpc.com/?api-key=abc");
+    std::vector<std::string> accEvents, progEvents, logEvents, sigEvents;
+    sol.onAccountChange([&](int h, const std::vector<uint8_t> &data, uint64_t lamports, uint64_t slot) {
+        accEvents.push_back(std::to_string(h) + ":" + std::to_string(data.size()) + ":" + (data.empty() ? "" : std::to_string(data[0])) + ":" + std::to_string(lamports) + ":" + std::to_string(slot));
+    });
+    sol.onProgramAccountChange([&](int h, const String &pk, const std::vector<uint8_t> &data, uint64_t slot) {
+        progEvents.push_back(std::to_string(h) + ":" + pk.s + ":" + std::to_string(data.size()) + ":" + std::to_string(slot));
+    });
+    sol.onLogs([&](int h, const String &sig, const std::vector<String> &logs, bool failed, uint64_t) {
+        logEvents.push_back(std::to_string(h) + ":" + sig.s + ":" + std::to_string(logs.size()) + ":" + (failed ? "fail" : "ok"));
+    });
+    sol.onSignature([&](int h, const String &sig, bool failed) { sigEvents.push_back(std::to_string(h) + ":" + sig.s + ":" + (failed ? "fail" : "ok")); });
+
+    int acc = sol.accountSubscribe("So11111111111111111111111111111111111111112");
+    CHECK(acc == 0 && sol.wsConnected(), "accountSubscribe handle " + std::to_string(acc));
+    CHECK(server.host == "devnet.helius-rpc.com" && server.port == 443 && server.requestLine == "GET /?api-key=abc HTTP/1.1", "url parsed: " + server.requestLine);
+    CHECK(server.requests.size() == 1 && server.requests[0].find("\"accountSubscribe\"") != std::string::npos &&
+          server.requests[0].find("\"encoding\":\"base64\"") != std::string::npos, "subscribe request");
+
+    // small, 16-bit and 64-bit length notifications
+    auto accNote = [](int64_t sub, const std::string &b64, uint64_t slot) {
+        return "{\"jsonrpc\":\"2.0\",\"method\":\"accountNotification\",\"params\":{\"result\":{\"context\":{\"slot\":" + std::to_string(slot) +
+               "},\"value\":{\"data\":[\"" + b64 + "\",\"base64\"],\"lamports\":99,\"owner\":\"11111111111111111111111111111111\"}},\"subscription\":" + std::to_string(sub) + "}}";
+    };
+    auto b64of = [](size_t n, uint8_t fill) {
+        std::vector<uint8_t> raw(n, fill); unsigned char *o = new unsigned char[n * 2 + 8]; size_t ol = 0;
+        mbedtls_base64_encode(o, n * 2 + 8, &ol, raw.data(), n); std::string r((char *)o, ol); delete[] o; return r;
+    };
+    server.pushText(accNote(1001, b64of(3, 7), 50));
+    server.pushText(accNote(1001, b64of(3000, 8), 51));
+    sol.setWsMaxMessageSize(256 * 1024);
+    server.pushText(accNote(1001, b64of(90000, 9), 52));
+    sol.wsLoop();
+    CHECK(accEvents.size() == 3 && accEvents[0] == "0:3:7:99:50" && accEvents[1] == "0:3000:8:99:51" && accEvents[2] == "0:90000:9:99:52",
+          "account notifications (" + std::to_string(accEvents.size()) + ") " + (accEvents.empty() ? "" : accEvents.back()));
+
+    // fragmented message + ping in between
+    server.pushText(accNote(1001, b64of(10, 1), 53), 40);
+    server.pushFrame(0x89, "hb");
+    sol.wsLoop();
+    CHECK(accEvents.size() == 4 && accEvents[3] == "0:10:1:99:53", "fragmented message");
+    CHECK(server.pongs == 1 && server.lastPongPayload == "hb", "ping answered with pong");
+    CHECK(server.allMasked, "client frames masked");
+
+    int prog = sol.programSubscribe("GmHx2yxARZ9ZxQwjceRWMBTXykJo6onZjrkraf4a4zvY", {AccountFilter::dataSize(622)});
+    CHECK(prog == 1 && server.requests.back().find("\"filters\":[{\"dataSize\":622}]") != std::string::npos, "programSubscribe with filters");
+    server.pushText("{\"jsonrpc\":\"2.0\",\"method\":\"programNotification\",\"params\":{\"result\":{\"context\":{\"slot\":60},\"value\":{\"pubkey\":\"PDA1\",\"account\":{\"data\":[\"AQID\",\"base64\"],\"lamports\":1}}},\"subscription\":1002}}");
+
+    int logs = sol.logsSubscribe("GmHx2yxARZ9ZxQwjceRWMBTXykJo6onZjrkraf4a4zvY");
+    CHECK(logs == 2 && server.requests.back().find("{\"mentions\":[\"GmHx2yxARZ9ZxQwjceRWMBTXykJo6onZjrkraf4a4zvY\"]}") != std::string::npos, "logsSubscribe");
+    server.pushText("{\"jsonrpc\":\"2.0\",\"method\":\"logsNotification\",\"params\":{\"result\":{\"context\":{\"slot\":61},\"value\":{\"signature\":\"SIGX\",\"err\":{\"InstructionError\":[0,\"Custom\"]},\"logs\":[\"a\",\"b\",\"c\"]}},\"subscription\":1003}}");
+
+    int sigh = sol.signatureSubscribe("SIGY");
+    server.pushText("{\"jsonrpc\":\"2.0\",\"method\":\"signatureNotification\",\"params\":{\"result\":{\"context\":{\"slot\":62},\"value\":{\"err\":null}},\"subscription\":1004}}");
+    // unknown subscription id must be ignored
+    server.pushText(accNote(999, b64of(3, 3), 63));
+    sol.wsLoop();
+    CHECK(progEvents.size() == 1 && progEvents[0] == "1:PDA1:3:60", "program notification");
+    CHECK(logEvents.size() == 1 && logEvents[0] == "2:SIGX:3:fail", "logs notification");
+    CHECK(sigh == 3 && sigEvents.size() == 1 && sigEvents[0] == "3:SIGY:ok", "signature notification");
+    CHECK(accEvents.size() == 4, "unknown subscription ignored");
+
+    CHECK(sol.unsubscribe(prog) && server.requests.back().find("\"programUnsubscribe\",\"params\":[1002]") != std::string::npos, "unsubscribe");
+    CHECK(!sol.unsubscribe(sigh), "one-shot signature handle already gone");
+
+    // connection drops: reconnect + re-subscribe, handles keep working
+    server.up = false;
+    sol.wsLoop();
+    CHECK(!sol.wsConnected(), "disconnect detected");
+    delay(6000);
+    server.nextServerId = 2001;
+    sol.wsLoop();
+    CHECK(sol.wsConnected() && server.connects == 2, "reconnected");
+    server.pushText(accNote(2001, b64of(5, 4), 70));
+    server.pushText("{\"jsonrpc\":\"2.0\",\"method\":\"logsNotification\",\"params\":{\"result\":{\"context\":{\"slot\":71},\"value\":{\"signature\":\"SIGZ\",\"err\":null,\"logs\":[]}},\"subscription\":2002}}");
+    sol.wsLoop();
+    CHECK(accEvents.size() == 5 && accEvents[4] == "0:5:4:99:70", "account handle after reconnect");
+    CHECK(logEvents.size() == 2 && logEvents[1] == "2:SIGZ:0:ok", "logs handle after reconnect");
+
+    // oversized message closes the socket instead of eating RAM
+    sol.setWsMaxMessageSize(1024);
+    server.pushText(accNote(2001, b64of(3000, 1), 80));
+    sol.setWsAutoReconnect(false);
+    sol.wsLoop();
+    CHECK(!sol.wsConnected() && accEvents.size() == 5, "oversized message rejected");
+
+    sol.wsDisconnect();
+    g_mockSocket = nullptr;
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -581,6 +766,7 @@ int main(int argc, char **argv) {
     testComputeBudget(sol, doc["computeBudget"]);
     testNonce(sol, doc["nonce"]);
     testSendReliability(sol);
+    testWebSocket(sol);
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");

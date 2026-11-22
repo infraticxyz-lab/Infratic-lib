@@ -38,6 +38,9 @@ namespace infratic_detail
     bool fromBase64(const char *in, std::vector<uint8_t> &out);
     size_t jsonCapacity(const String &response);
 
+    // JSON array for getProgramAccounts / programSubscribe filters
+    String filtersJson(const std::vector<AccountFilter> &filters);
+
     // Fills a TxError from an RPC "err" value and optional log array
     void parseTxError(JsonVariantConst err, JsonVariantConst logs, TxError &out);
 }

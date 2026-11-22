@@ -7,6 +7,7 @@
 HardwareSerial Serial;
 WiFiClass WiFi;
 bool g_serialQuiet = true;
+MockSocket *g_mockSocket = nullptr;
 std::function<MockHttpResponse(const std::string &, const std::string &)> g_httpHandler;
 
 static unsigned long g_fakeMillis = 0;

@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include <vector>
+#include <memory>
+#include <functional>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -289,6 +291,18 @@ struct SignatureInfo
 };
 
 // ============================================================================
+// WEBSOCKET SUBSCRIPTION CALLBACKS
+// ============================================================================
+
+// handle = value returned by the *Subscribe call (stays the same after reconnects)
+typedef std::function<void(int handle, const std::vector<uint8_t> &data, uint64_t lamports, uint64_t slot)> AccountChangeCallback;
+typedef std::function<void(int handle, const String &pubkey, const std::vector<uint8_t> &data, uint64_t slot)> ProgramAccountCallback;
+typedef std::function<void(int handle, const String &signature, const std::vector<String> &logs, bool failed, uint64_t slot)> LogsCallback;
+typedef std::function<void(int handle, const String &signature, bool failed)> SignatureCallback;
+
+struct InfraticWsState; // internal
+
+// ============================================================================
 // MAIN LIBRARY CLASS
 // ============================================================================
 
@@ -465,6 +479,38 @@ public:
      */
     bool estimatePriorityFee(const std::vector<String> &writableAccounts, uint64_t &outMicroLamports,
                              uint8_t percentile = 75);
+
+    // ========================================================================
+    // WEBSOCKET SUBSCRIPTIONS (push notifications instead of polling)
+    // ========================================================================
+
+    /** @brief WebSocket endpoint, default: RPC URL with https->wss (port 8899->8900 for localnet) */
+    void setWsUrl(const String &wsUrl);
+    bool wsConnect();
+    void wsDisconnect();
+    bool wsConnected() const;
+    /** @brief Reconnect and re-subscribe automatically when the socket drops (default on) */
+    void setWsAutoReconnect(bool enabled);
+    /** @brief Largest WebSocket message kept in RAM (default 64 KB) */
+    void setWsMaxMessageSize(size_t bytes);
+
+    /** @return handle (>= 0) or -1 */
+    int accountSubscribe(const String &accountBase58, const String &commitment = "confirmed");
+    int programSubscribe(const String &programIdBase58, const std::vector<AccountFilter> &filters = {},
+                         const String &commitment = "confirmed");
+    /** @param mentionsBase58 Only logs of transactions mentioning this address ("all" = everything) */
+    int logsSubscribe(const String &mentionsBase58, const String &commitment = "confirmed");
+    /** @brief One-shot: fires once when the signature is confirmed (or failed) */
+    int signatureSubscribe(const String &signature, const String &commitment = "confirmed");
+    bool unsubscribe(int handle);
+
+    void onAccountChange(AccountChangeCallback cb);
+    void onProgramAccountChange(ProgramAccountCallback cb);
+    void onLogs(LogsCallback cb);
+    void onSignature(SignatureCallback cb);
+
+    /** @brief Call often from loop(): reads messages, runs callbacks, keeps the socket alive */
+    void wsLoop();
 
     // ========================================================================
     // DURABLE NONCE (sign now, send later)
@@ -1014,6 +1060,12 @@ public:
 private:
     String _rpcUrl;
     uint64_t _priorityFeeMicroLamports = 0;
+    std::shared_ptr<InfraticWsState> _ws;
+    InfraticWsState &ws();
+    int wsSubscribe(const String &method, const String &params, int kind, const String &extra);
+    bool wsSendText(const String &text);
+    bool wsProcessIncoming(uint32_t waitMs, int waitForId, int64_t *outResult);
+    void wsHandleMessage(const String &msg, int waitForId, int64_t *outResult, bool *gotResult);
     TxError _lastTxError;
 
     // 1 = confirmed, -1 = failed (lastTxError set), 0 = pending / unknown

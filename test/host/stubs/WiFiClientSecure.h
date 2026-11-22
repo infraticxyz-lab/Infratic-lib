@@ -1,8 +1,9 @@
 #pragma once
 #include <Arduino.h>
-class WiFiClientSecure {
+#include "WiFiClient.h"
+class WiFiClientSecure : public WiFiClient
+{
 public:
     void setInsecure() {}
     void setCACert(const char *) {}
-    void setTimeout(uint32_t) {}
 };
