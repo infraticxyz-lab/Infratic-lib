@@ -38,6 +38,18 @@ namespace infratic_detail
     bool fromBase64(const char *in, std::vector<uint8_t> &out);
     size_t jsonCapacity(const String &response);
 
+    struct CompiledKey
+    {
+        Pubkey key;
+        bool signer;
+        bool writable;
+    };
+
+    // Unique accounts ordered as the runtime expects (payer, writable signers,
+    // readonly signers, writable, readonly) plus the legacy message header
+    std::vector<CompiledKey> compileKeys(const Transaction &tx, uint8_t header[3]);
+    int keyIndex(const std::vector<CompiledKey> &keys, const Pubkey &k);
+
     // JSON array for getProgramAccounts / programSubscribe filters
     String filtersJson(const std::vector<AccountFilter> &filters);
 

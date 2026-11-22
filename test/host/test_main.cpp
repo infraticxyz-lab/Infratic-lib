@@ -12,6 +12,7 @@
 #include <mbedtls/sha1.h>
 #include <WiFiClient.h>
 #include <deque>
+#include <algorithm>
 
 #ifndef INFRATIC_VERSION
 Infratic solana("https://mock.rpc"); // old lib needs this global
@@ -745,6 +746,162 @@ static void testAnchorEvents(Infratic &sol, JsonObject c)
     CHECK(!sol.getTransactionLogs("SIG_MISSING", fetched), "missing transaction");
 }
 
+// Resolves a v0 message (static keys + lookups) into the same canonical form as decodeMsg
+static DecodedMsg decodeMsgV0(const std::vector<uint8_t> &m, std::map<std::string, std::vector<std::string>> &tables,
+                              std::string &lookedUp)
+{
+    DecodedMsg d;
+    if (m.size() < 5 || m[0] != 0x80) return d;
+    size_t o = 1;
+    for (int i = 0; i < 3; i++) d.header[i] = m[o++];
+    size_t ns = readCompact(m, o);
+    std::vector<std::string> keys;
+    for (size_t i = 0; i < ns; i++) { keys.push_back(toHex(std::vector<uint8_t>(m.begin() + o, m.begin() + o + 32))); o += 32; }
+    d.blockhash = toHex(std::vector<uint8_t>(m.begin() + o, m.begin() + o + 32)); o += 32;
+    struct Ix { size_t prog; std::vector<size_t> accts; std::vector<uint8_t> data; };
+    std::vector<Ix> ixs;
+    size_t ni = readCompact(m, o);
+    for (size_t i = 0; i < ni; i++)
+    {
+        Ix ix; ix.prog = m[o++];
+        size_t na = readCompact(m, o);
+        for (size_t j = 0; j < na; j++) ix.accts.push_back(m[o++]);
+        size_t nd = readCompact(m, o);
+        ix.data.assign(m.begin() + o, m.begin() + o + nd); o += nd;
+        ixs.push_back(ix);
+    }
+    std::vector<std::string> wkeys, rkeys;
+    std::vector<std::string> lk;
+    size_t nl = readCompact(m, o);
+    for (size_t i = 0; i < nl; i++)
+    {
+        std::string tkey = toHex(std::vector<uint8_t>(m.begin() + o, m.begin() + o + 32)); o += 32;
+        std::vector<std::string> &addrs = tables[tkey];
+        size_t nw = readCompact(m, o);
+        for (size_t j = 0; j < nw; j++) { wkeys.push_back(addrs.at(m[o])); lk.push_back(addrs.at(m[o++]) + "W"); }
+        size_t nr = readCompact(m, o);
+        for (size_t j = 0; j < nr; j++) { rkeys.push_back(addrs.at(m[o])); lk.push_back(addrs.at(m[o++]) + "R"); }
+    }
+    std::sort(lk.begin(), lk.end());
+    for (auto &x : lk) lookedUp += x.substr(0, 8) + x.back() + " ";
+    std::map<std::string, std::string> flags;
+    for (size_t i = 0; i < ns; i++)
+    {
+        bool signer = i < (size_t)d.header[0];
+        bool writable = signer ? i < (size_t)(d.header[0] - d.header[1]) : i < ns - d.header[2];
+        flags[keys[i]] = std::string(signer ? "S" : "-") + (writable ? "W" : "R");
+    }
+    std::vector<std::string> all = keys;
+    for (auto &k : wkeys) { flags[k] = "-W"; all.push_back(k); }
+    for (auto &k : rkeys) { flags[k] = "-R"; all.push_back(k); }
+    for (auto &kv : flags) d.canon += kv.first.substr(0, 8) + ":" + kv.second + " ";
+    d.canon += "| " + d.blockhash.substr(0, 8) + " |";
+    for (auto &ix : ixs)
+    {
+        d.canon += " ix " + all.at(ix.prog).substr(0, 8) + " [";
+        for (size_t a : ix.accts) d.canon += all.at(a).substr(0, 8) + ",";
+        d.canon += "] " + toHex(ix.data);
+    }
+    d.keys = keys;
+    d.payer = keys.empty() ? "" : keys[0];
+    d.ok = (o == m.size());
+    return d;
+}
+
+static void testVersioned(Infratic &sol, JsonObject c)
+{
+    g_group = "v0";
+    for (JsonObject vc : c["cases"].as<JsonArray>())
+    {
+        std::string name = vc["name"].as<std::string>();
+        Transaction tx;
+        tx.version = 0;
+        std::vector<Keypair> signers;
+        for (JsonVariant sk : vc["signers"].as<JsonArray>()) signers.push_back(Keypair::fromBase58(sk.as<const char *>()));
+        tx.fee_payer = signers[0].pubkey();
+        tx.recent_blockhash = vc["blockhash"].as<const char *>();
+        for (JsonObject ix : vc["instructions"].as<JsonArray>())
+        {
+            std::vector<AccountMeta> metas;
+            for (JsonObject a : ix["accounts"].as<JsonArray>())
+                metas.push_back(AccountMeta{Pubkey::fromBase58(a["key"].as<const char *>()), a["signer"].as<bool>(), a["writable"].as<bool>()});
+            tx.add(Instruction(Pubkey::fromBase58(ix["program"].as<const char *>()), metas, fromHex(ix["data"].as<std::string>())));
+        }
+        std::map<std::string, std::vector<std::string>> tables;
+        for (JsonObject t : vc["tables"].as<JsonArray>())
+        {
+            AddressLookupTable alt;
+            alt.key = Pubkey::fromBase58(t["key"].as<const char *>());
+            for (JsonVariant a : t["addresses"].as<JsonArray>())
+            {
+                alt.addresses.push_back(Pubkey::fromBase58(a.as<const char *>()));
+                tables[toHex(alt.key.data)].push_back(toHex(alt.addresses.back().data));
+            }
+            tx.lookupTables.push_back(alt);
+        }
+
+        std::vector<uint8_t> ours = tx.serializeMessage();
+        std::string lkA, lkB;
+        DecodedMsg a = decodeMsgV0(ours, tables, lkA), b = decodeMsgV0(fromHex(vc["message"].as<std::string>()), tables, lkB);
+        CHECK(a.ok && b.ok, name + " parses");
+        CHECK(a.header[0] == b.header[0] && a.header[1] == b.header[1] && a.header[2] == b.header[2] && a.keys.size() == b.keys.size(),
+              name + " header/static keys " + std::to_string(a.keys.size()) + " vs " + std::to_string(b.keys.size()));
+        CHECK(lkA == lkB, name + " same accounts from tables\n    want " + lkB + "\n    got  " + lkA);
+        CHECK(a.canon == b.canon, name + " accounts/instructions\n    want " + b.canon + "\n    got  " + a.canon);
+        CHECK(a.payer == b.payer, name + " fee payer first");
+
+        CHECK(tx.sign(signers), name + " sign");
+        std::string b64 = tx.serializeBase64().s;
+        std::vector<uint8_t> raw(b64.size()); size_t n = 0;
+        mbedtls_base64_decode(raw.data(), raw.size(), &n, (const unsigned char *)b64.data(), b64.size()); raw.resize(n);
+        size_t ns = signers.size();
+        bool ok = raw.size() > 1 + 64 * ns && raw[0] == ns &&
+                  std::vector<uint8_t>(raw.begin() + 1 + 64 * ns, raw.end()) == ours;
+        for (size_t i = 0; ok && i < ns; i++) ok = Ed25519::verify(raw.data() + 1 + 64 * i, fromHex(a.keys[i]).data(), ours.data(), ours.size());
+        CHECK(ok, name + " signed v0 tx");
+    }
+
+    // reading a lookup table account
+    JsonObject ta = c["tableAccount"];
+    std::string tdata = ta["data"].as<std::string>(), owner = "AddressLookupTab1e1111111111111111111111111";
+    g_httpHandler = [&](const std::string &, const std::string &body) -> MockHttpResponse {
+        if (body.find("getAccountInfo") != std::string::npos)
+            return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":{\"data\":[\"" + tdata + "\",\"base64\"],\"owner\":\"" + owner + "\",\"lamports\":1}}}"};
+        return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"};
+    };
+    AddressLookupTable alt;
+    bool okAlt = sol.getAddressLookupTable(ta["key"].as<const char *>(), alt) && alt.addresses.size() == ta["addresses"].size();
+    for (size_t i = 0; okAlt && i < alt.addresses.size(); i++)
+        okAlt = base58Encode(alt.addresses[i].data.data(), 32) == ta["addresses"][i].as<const char *>();
+    CHECK(okAlt && base58Encode(alt.key.data.data(), 32) == ta["key"].as<const char *>(), "getAddressLookupTable");
+    owner = "11111111111111111111111111111111";
+    CHECK(!sol.getAddressLookupTable(ta["key"].as<const char *>(), alt), "wrong owner rejected");
+
+    auto ixMatches = [&](const Instruction &ix, JsonObject want) {
+        if (base58Encode(ix.programId.data.data(), 32) != want["program"].as<const char *>()) return false;
+        if (toHex(ix.data) != want["data"].as<std::string>()) return false;
+        JsonArray accs = want["accounts"];
+        if (accs.size() != ix.accounts.size()) return false;
+        for (size_t i = 0; i < accs.size(); i++)
+        {
+            const AccountMeta &m = ix.accounts[i];
+            if (base58Encode(m.pubkey.data.data(), 32) != accs[i]["key"].as<const char *>() ||
+                m.isSigner != accs[i]["signer"].as<bool>() || m.isWritable != accs[i]["writable"].as<bool>()) return false;
+        }
+        return true;
+    };
+    JsonObject cr = c["create"];
+    Instruction createIx(Pubkey(), {}, {});
+    String tableAddr;
+    CHECK(sol.createLookupTableIx(cr["authority"].as<const char *>(), cr["authority"].as<const char *>(), cr["slot"].as<uint64_t>(), createIx, tableAddr) &&
+          tableAddr == cr["table"].as<const char *>() && ixMatches(createIx, cr["ix"]), "createLookupTableIx " + tableAddr.s);
+    JsonObject ex = c["extend"];
+    std::vector<Pubkey> newAddrs;
+    for (JsonVariant a : ex["addresses"].as<JsonArray>()) newAddrs.push_back(Pubkey::fromBase58(a.as<const char *>()));
+    Pubkey auth = Pubkey::fromBase58(cr["authority"].as<const char *>());
+    CHECK(ixMatches(Infratic::extendLookupTableIx(Pubkey::fromBase58(cr["table"].as<const char *>()), auth, auth, newAddrs), ex["ix"]), "extendLookupTableIx");
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -818,6 +975,7 @@ int main(int argc, char **argv) {
     testSendReliability(sol);
     testWebSocket(sol);
     testAnchorEvents(sol, doc["events"]);
+    testVersioned(sol, doc["v0"]);
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");

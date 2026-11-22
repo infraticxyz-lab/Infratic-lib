@@ -15,7 +15,7 @@
 
 #include "base58.h"
 
-#define INFRATIC_VERSION "1.1.0"
+#define INFRATIC_VERSION "1.2.0"
 
 // Well-known program IDs
 #define INFRATIC_SYSTEM_PROGRAM_ID "11111111111111111111111111111111"
@@ -25,6 +25,7 @@
 #define INFRATIC_COMPUTE_BUDGET_PROGRAM_ID "ComputeBudget111111111111111111111111111111"
 #define INFRATIC_SYSVAR_RECENT_BLOCKHASHES_ID "SysvarRecentB1ockHashes11111111111111111111"
 #define INFRATIC_SYSVAR_RENT_ID "SysvarRent111111111111111111111111111111111"
+#define INFRATIC_ADDRESS_LOOKUP_TABLE_PROGRAM_ID "AddressLookupTab1e1111111111111111111111111"
 
 /** Log levels for Infratic::setLogLevel() */
 enum InfraticLogLevel : uint8_t
@@ -107,8 +108,17 @@ struct Instruction
     Instruction(const Pubkey &pid, const std::vector<AccountMeta> &accts, const std::vector<uint8_t> &d);
 };
 
+/** Address Lookup Table contents (see Infratic::getAddressLookupTable) */
+struct AddressLookupTable
+{
+    Pubkey key;
+    std::vector<Pubkey> addresses;
+};
+
 struct Transaction
 {
+    int version = -1;                              // -1 = legacy, 0 = versioned (v0)
+    std::vector<AddressLookupTable> lookupTables; // v0 only: accounts loaded from these tables
     String recent_blockhash;
     Pubkey fee_payer;
     std::vector<Instruction> instructions;
@@ -122,6 +132,8 @@ struct Transaction
      * fee payer, writable signers, readonly signers, writable, readonly.
      */
     std::vector<uint8_t> serializeMessage() const;
+    /** @brief v0 message with address table lookups (used when version == 0) */
+    std::vector<uint8_t> serializeMessageV0() const;
 
     /**
      * @brief Signs with every keypair that is a required signer.
@@ -590,6 +602,25 @@ public:
 
     /** @brief Log messages of a confirmed transaction */
     bool getTransactionLogs(const String &signature, std::vector<String> &outLogs);
+
+    // ========================================================================
+    // ADDRESS LOOKUP TABLES (versioned transactions)
+    // ========================================================================
+
+    /** @brief Reads a lookup table account so it can be used in tx.lookupTables */
+    bool getAddressLookupTable(const String &tableBase58, AddressLookupTable &outTable);
+
+    /**
+     * @brief CreateLookupTable instruction
+     * @param recentSlot A recent finalized slot (getSlot)
+     * @param outTable Derived table address
+     */
+    bool createLookupTableIx(const String &authorityBase58, const String &payerBase58, uint64_t recentSlot,
+                             Instruction &outIx, String &outTable);
+
+    /** @brief ExtendLookupTable instruction (max ~30 addresses per transaction) */
+    static Instruction extendLookupTableIx(const Pubkey &table, const Pubkey &authority, const Pubkey &payer,
+                                          const std::vector<Pubkey> &newAddresses);
 
     // ========================================================================
     // DURABLE NONCE (sign now, send later)

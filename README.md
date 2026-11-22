@@ -2,7 +2,7 @@
 
 **Infratic** is a C++ blockchain library for ESP32 microcontrollers, enabling direct interaction with the **Solana blockchain** and **Anchor framework** smart contracts.
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/infraticxyz-lab/Infratic-lib)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/infraticxyz-lab/Infratic-lib)
 [![Platform](https://img.shields.io/badge/platform-ESP32-green.svg)](https://www.espressif.com/en/products/socs/esp32)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
 
@@ -33,6 +33,7 @@
 - ✅ Anchor discriminators, `BorshReader` / `BorshWriter`
 - ✅ Anchor events (`emit!`) from transaction logs or live log subscriptions
 - ✅ Custom instructions, multi-instruction and multi-signer transactions
+- ✅ Versioned transactions (v0) with Address Lookup Tables
 - ✅ x402 escrow client (create, confirm delivery, release, cancel, dispute, force close)
 
 ### 📡 RPC & Subscriptions
@@ -55,7 +56,7 @@ board = esp32dev
 framework = arduino
 
 lib_deps =
-    asimbugra/Infratic@^1.1.0
+    asimbugra/Infratic@^1.2.0
     bblanchon/ArduinoJson@^6.21.5
 
 build_flags =
@@ -219,6 +220,25 @@ The WebSocket URL is derived from the RPC URL (`https://` → `wss://`), or set 
 
 ---
 
+## 📇 Versioned Transactions & Lookup Tables
+
+Programs that touch many accounts need v0 transactions: accounts listed in a lookup table cost 1 byte instead of 32.
+
+```cpp
+AddressLookupTable table;
+solana.getAddressLookupTable(TABLE_ADDRESS, table);
+
+Transaction tx;
+tx.version = 0;
+tx.lookupTables.push_back(table);
+tx.add(/* instructions with many accounts */);
+solana.signAndSend(tx, {myKeypair}, sig);
+```
+
+Create your own table with `createLookupTableIx` and fill it with `extendLookupTableIx`.
+
+---
+
 ## 🔒 Durable Nonce
 
 A normal transaction must reach the network within ~60 seconds of fetching the blockhash. With a durable nonce a device can sign a transaction now and send it whenever it is online.
@@ -324,6 +344,15 @@ cd test/host
 ---
 
 ## 📝 Changelog
+
+### 1.2.0
+- SPL token transfers (`sendSplToken`, `transferCheckedIx`), ATA derivation and idempotent creation, Token-2022
+- Priority fees: `setPriorityFee`, `estimatePriorityFee`, compute budget instructions
+- Durable nonce: `createNonceAccount`, `getNonce`, `useDurableNonce`; `Keypair::generate` / `fromSeed`
+- Reliable sending: `signAndSend` re-broadcasts until confirmed, blockhash expiry, `simulateTransaction`, `lastTxError()` with Anchor error decoding
+- WebSocket subscriptions: account, program, logs, signature; auto reconnect
+- Anchor events (`parseAnchorEvents`, `getTransactionLogs`), public `BorshReader` / `BorshWriter`
+- Versioned transactions (v0) and Address Lookup Tables
 
 ### 1.1.0
 - Fixed PDA derivation: off-curve check was missing, bumps other than 255 were wrong

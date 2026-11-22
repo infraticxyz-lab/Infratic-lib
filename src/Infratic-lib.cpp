@@ -1353,15 +1353,8 @@ void Transaction::add(const Instruction &ix)
     instructions.push_back(ix);
 }
 
-namespace
+namespace infratic_detail
 {
-    struct CompiledKey
-    {
-        Pubkey key;
-        bool signer;
-        bool writable;
-    };
-
     // Collects unique accounts and orders them the way the runtime expects:
     // fee payer, writable signers, readonly signers, writable, readonly.
     std::vector<CompiledKey> compileKeys(const Transaction &tx, uint8_t header[3])
@@ -1429,8 +1422,16 @@ namespace
     }
 }
 
+using infratic_detail::CompiledKey;
+using infratic_detail::compileKeys;
+using infratic_detail::keyIndex;
+
 std::vector<uint8_t> Transaction::serializeMessage() const
 {
+    if (version == 0)
+    {
+        return serializeMessageV0();
+    }
     if (fee_payer.data.size() != 32)
     {
         _logErr.println("❌ Transaction: fee payer not set");

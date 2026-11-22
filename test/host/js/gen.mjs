@@ -2,6 +2,7 @@
 // Run: npm install && node gen.mjs > ../vectors.json
 import {
   Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, ComputeBudgetProgram,
+  TransactionMessage, VersionedTransaction, AddressLookupTableAccount, AddressLookupTableProgram,
 } from '@solana/web3.js';
 import bs58 from 'bs58';
 import {
@@ -268,6 +269,54 @@ for (const prog of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
   out.events = { program: PROG, other: other.toBase58(), node: node.toBase58(), user: user.toBase58(), logs,
     fulfilledData: hex(fulfilled.subarray(8)), accountRequest: hex(d8('account', 'Request')),
     eventFulfilled: hex(d8('event', 'RequestFulfilled')) };
+}
+
+// ---- versioned transactions + lookup tables --------------------------------------------
+{
+  const mkTable = (addresses) => new AddressLookupTableAccount({ key: key(), state: {
+    deactivationSlot: BigInt('18446744073709551615'), lastExtendedSlot: 0, lastExtendedSlotStartIndex: 0,
+    authority: undefined, addresses } });
+  const ixJson = (ix) => ({ program: ix.programId.toBase58(), data: hex(ix.data),
+    accounts: ix.keys.map((k) => ({ key: k.pubkey.toBase58(), signer: k.isSigner, writable: k.isWritable })) });
+  const v0Case = (name, signers, ixs, tables) => {
+    const bh = blockhash();
+    const msg = new TransactionMessage({ payerKey: signers[0].publicKey, recentBlockhash: bh, instructions: ixs })
+      .compileToV0Message(tables);
+    const vtx = new VersionedTransaction(msg); vtx.sign(signers);
+    return { name, blockhash: bh, signers: signers.map((k) => bs58.encode(k.secretKey)), instructions: ixs.map(ixJson),
+      tables: tables.map((t) => ({ key: t.key.toBase58(), addresses: t.state.addresses.map((a) => a.toBase58()) })),
+      message: hex(msg.serialize()) };
+  };
+  const payer = kp(); const progA = key(); const progB = key();
+  const w = [key(), key(), key()]; const r = [key(), key(), key()]; const extra = key();
+  const t1 = mkTable([key(), w[0], r[0], progB, payer.publicKey, w[1], r[1], key()]);
+  const t2 = mkTable([r[1], w[2], r[2], key()]);
+  const ix1 = new TransactionInstruction({ programId: progA, data: Buffer.from(bytes(20)), keys: [
+    { pubkey: w[0], isSigner: false, isWritable: true }, { pubkey: r[0], isSigner: false, isWritable: false },
+    { pubkey: payer.publicKey, isSigner: true, isWritable: true }, { pubkey: extra, isSigner: false, isWritable: true }] });
+  const ix2 = new TransactionInstruction({ programId: progB, data: Buffer.from(bytes(5)), keys: [
+    { pubkey: w[1], isSigner: false, isWritable: true }, { pubkey: r[1], isSigner: false, isWritable: false },
+    { pubkey: w[2], isSigner: false, isWritable: true }, { pubkey: r[2], isSigner: false, isWritable: false }] });
+  const second = kp();
+  const ix3 = new TransactionInstruction({ programId: progA, data: Buffer.from(bytes(3)), keys: [
+    { pubkey: second.publicKey, isSigner: true, isWritable: false }, { pubkey: w[0], isSigner: false, isWritable: true }] });
+  const cases = [
+    v0Case('one table', [payer], [ix1, ix2], [t1]),
+    v0Case('two tables', [payer, second], [ix1, ix2, ix3], [t1, t2]),
+    v0Case('no tables', [payer], [ix1], []),
+  ];
+  // lookup table account data + program instructions
+  const table = mkTable([w[0], r[0], extra]);
+  const meta = Buffer.alloc(56); meta.writeUInt32LE(1, 0); meta.writeBigUInt64LE(BigInt('18446744073709551615'), 4);
+  meta.writeUInt8(1, 21); payer.publicKey.toBuffer().copy(meta, 22);
+  const tableData = Buffer.concat([meta, ...table.state.addresses.map((a) => a.toBuffer())]);
+  const [createIx, tableAddr] = AddressLookupTableProgram.createLookupTable({ authority: payer.publicKey, payer: payer.publicKey, recentSlot: 123456789 });
+  const extendIx = AddressLookupTableProgram.extendLookupTable({ lookupTable: tableAddr, authority: payer.publicKey,
+    payer: payer.publicKey, addresses: [w[0], r[0]] });
+  out.v0 = { cases, tableAccount: { key: table.key.toBase58(), data: tableData.toString('base64'),
+    addresses: table.state.addresses.map((a) => a.toBase58()) },
+    create: { authority: payer.publicKey.toBase58(), slot: 123456789, table: tableAddr.toBase58(), ix: ixJson(createIx) },
+    extend: { ix: ixJson(extendIx), addresses: [w[0].toBase58(), r[0].toBase58()] } };
 }
 
 process.stdout.write(JSON.stringify(out));
