@@ -523,7 +523,7 @@ static void testSendReliability(Infratic &sol)
 struct MockWsServer : MockSocket
 {
     bool up = false, handshakeDone = false, allMasked = true;
-    std::string host, requestLine;
+    std::string host, requestLine, refuseHost;
     uint16_t port = 0;
     int connects = 0, pongs = 0, nextServerId = 1001;
     std::vector<uint8_t> in;
@@ -531,7 +531,7 @@ struct MockWsServer : MockSocket
     std::vector<std::string> requests;
     std::string lastPongPayload;
 
-    bool connect(const std::string &h, uint16_t p) override { host = h; port = p; up = true; handshakeDone = false; in.clear(); out.clear(); connects++; return true; }
+    bool connect(const std::string &h, uint16_t p) override { if (h == refuseHost) return false; host = h; port = p; up = true; handshakeDone = false; in.clear(); out.clear(); connects++; return true; }
     bool connected() override { return up || !out.empty(); }
     void stop() override { up = false; }
     int available() override { return (int)out.size(); }
@@ -1113,6 +1113,69 @@ static void testLowPower()
     CHECK(sol.getBlockHeight(h) && h == 7 && g_httpTimeout == 3000 && g_httpConnectTimeout == 3000, "timeout applied to http client");
 }
 
+static void testFailover()
+{
+    g_group = "failover";
+    std::map<std::string, int> status, hits;
+    g_httpHandler = [&](const std::string &url, const std::string &) -> MockHttpResponse {
+        hits[url]++;
+        int st = status.count(url) ? status[url] : 200;
+        if (st == 200) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":5}"};
+        if (st == 299) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"bad params\"}}"};
+        return {st, "down"};
+    };
+    const std::string A = "https://a.rpc", B = "https://b.rpc", C = "https://c.rpc";
+    Infratic sol(A.c_str());
+    sol.addRpcEndpoint(B.c_str()); sol.addRpcEndpoint(C.c_str()); sol.addRpcEndpoint(B.c_str());
+    uint64_t h = 0;
+
+    status[A] = -1;
+    CHECK(sol.getBlockHeight(h) && h == 5 && hits[A] == 1 && hits[B] == 1, "connection error -> next endpoint");
+    CHECK(sol.activeRpcUrl() == B.c_str(), "backup stays active");
+    status[A] = 200;
+    CHECK(sol.getBlockHeight(h) && hits[A] == 1 && hits[B] == 2, "no retry of primary right away");
+
+    status[B] = 429;
+    CHECK(sol.getBlockHeight(h) && hits[C] == 1 && sol.activeRpcUrl() == C.c_str(), "429 -> next endpoint");
+    status[C] = 503; status[A] = 502;
+    CHECK(!sol.getBlockHeight(h) && hits[A] == 2 && hits[B] == 4 && hits[C] == 2, "all down: each tried once");
+
+    status.clear(); hits.clear();
+    sol.clearRpcEndpoints(); sol.addRpcEndpoint(B.c_str());
+    CHECK(sol.activeRpcUrl() == A.c_str(), "clearRpcEndpoints back to primary");
+    status[A] = 400;
+    CHECK(!sol.getBlockHeight(h) && hits[A] == 1 && hits[B] == 0, "client error (400) is not failed over");
+    status[A] = 299;
+    CHECK(!sol.getBlockHeight(h) && hits[B] == 0 && sol.activeRpcUrl() == A.c_str(), "rpc error is not failed over");
+
+    status[A] = 500;
+    sol.setPrimaryRetryInterval(1000);
+    CHECK(sol.getBlockHeight(h) && sol.activeRpcUrl() == B.c_str(), "5xx -> backup");
+    status[A] = 200;
+    delay(1001);
+    CHECK(sol.getBlockHeight(h) && sol.activeRpcUrl() == A.c_str() && hits[B] == 1, "primary tried again after the interval");
+
+    Infratic single(A.c_str());
+    status[A] = 503; hits.clear();
+    CHECK(!single.getBlockHeight(h) && hits[A] == 1, "single endpoint: one attempt");
+
+    // websocket follows the active endpoint
+    MockWsServer srv; g_mockSocket = &srv;
+    status.clear();
+    Infratic ws(A.c_str()); ws.addRpcEndpoint(B.c_str());
+    status[A] = -1;
+    ws.getBlockHeight(h);
+    CHECK(ws.wsConnect() && srv.host == "b.rpc", "ws connects to the active endpoint");
+    ws.wsDisconnect();
+    Infratic ws2(A.c_str()); ws2.addRpcEndpoint(B.c_str());
+    srv.refuseHost = "a.rpc";
+    CHECK(ws2.wsConnect() && srv.host == "b.rpc" && ws2.activeRpcUrl() == B.c_str(), "ws connect failure -> next endpoint");
+    ws2.wsDisconnect();
+    Infratic ws3(A.c_str()); ws3.addRpcEndpoint(B.c_str()); ws3.setWsUrl("wss://a.rpc/ws");
+    CHECK(!ws3.wsConnect() && ws3.activeRpcUrl() == A.c_str(), "explicit ws url is not rotated");
+    g_mockSocket = nullptr;
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -1191,6 +1254,7 @@ int main(int argc, char **argv) {
     testDeviceSignatures(sol, doc["ed25519"]);
     testTls();
     testLowPower();
+    testFailover();
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");

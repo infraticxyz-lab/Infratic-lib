@@ -15,7 +15,7 @@
 
 #include "base58.h"
 
-#define INFRATIC_VERSION "1.2.0"
+#define INFRATIC_VERSION "1.3.0"
 
 // Well-known program IDs
 #define INFRATIC_SYSTEM_PROGRAM_ID "11111111111111111111111111111111"
@@ -844,6 +844,17 @@ public:
     void setTlsInsecure(bool insecure = true);
 
     /**
+     * @brief Adds a backup RPC endpoint. When the active endpoint fails (connection or TLS error,
+     *        HTTP 429 or 5xx) the request is retried on the next one, which then stays active.
+     *        After 5 minutes on a backup the primary is tried again. WebSocket follows the active
+     *        endpoint unless setWsUrl() was used.
+     */
+    void addRpcEndpoint(const String &url);
+    void clearRpcEndpoints(); // keeps only the primary
+    String activeRpcUrl() const { return _rpcUrl; }
+    void setPrimaryRetryInterval(uint32_t ms) { _primaryRetryMs = ms; }
+
+    /**
      * @brief HTTP connect / read timeout for RPC calls (default 10000 ms).
      *        Lower it on battery devices so a dead network costs less awake time.
      */
@@ -1328,6 +1339,13 @@ private:
     const char *_rootCA = nullptr;
     bool _tlsInsecure = false;
     uint32_t _timeoutMs = 10000;
+    std::vector<String> _rpcUrls; // [0] = primary
+    size_t _activeRpc = 0;
+    unsigned long _switchedAt = 0;
+    uint32_t _primaryRetryMs = 300000;
+    void useRpc(size_t index);
+    bool wsConnectOnce();
+    bool httpPostOnce(const String &body, String &outResponse, int &outCode);
     void configureTls(WiFiClientSecure &client);
     // POST to the RPC endpoint, true on HTTP 200
     bool httpPost(const String &body, String &outResponse, int &outCode);

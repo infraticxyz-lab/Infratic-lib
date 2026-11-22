@@ -2,7 +2,7 @@
 
 **Infratic** is a C++ blockchain library for ESP32 microcontrollers, enabling direct interaction with the **Solana blockchain** and **Anchor framework** smart contracts.
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/infraticxyz-lab/Infratic-lib)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/infraticxyz-lab/Infratic-lib)
 [![Platform](https://img.shields.io/badge/platform-ESP32-green.svg)](https://www.espressif.com/en/products/socs/esp32)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
 
@@ -46,6 +46,7 @@
 - ✅ `getAccountData`, `getProgramAccounts` (with `dataSize` / `memcmp` filters), `getSignaturesForAddress`
 - ✅ `getMinimumBalanceForRentExemption`
 - ✅ Low power flow: fast WiFi reconnect after deep sleep, persistent data queue, RPC timeouts
+- ✅ RPC failover: backup endpoints, switch on connection errors, 429 and 5xx
 - ✅ Verified TLS: server certificates are checked against built-in root CAs of the common RPC providers
 
 ---
@@ -61,7 +62,7 @@ board = esp32dev
 framework = arduino
 
 lib_deps =
-    asimbugra/Infratic@^1.2.0
+    asimbugra/Infratic@^1.3.0
     bblanchon/ArduinoJson@^6.21.5
 
 build_flags =
@@ -234,6 +235,18 @@ void setup() {
 ```
 
 When the queue is full the oldest entry is dropped. The WiFi cache lives in RTC memory, so it is gone after a power loss and the next connect scans once.
+
+---
+
+## 🔀 RPC Failover
+
+```cpp
+Infratic sol("https://mainnet.helius-rpc.com/?api-key=...");
+sol.addRpcEndpoint("https://api.mainnet-beta.solana.com");
+sol.addRpcEndpoint("https://solana-rpc.publicnode.com");
+```
+
+If the active endpoint has a connection or TLS error, returns 429 or 5xx, the same request goes to the next one, which then stays active. After 5 minutes the primary is tried again (`setPrimaryRetryInterval`). RPC errors (bad params, failed simulation) are not retried. WebSocket connects to the active endpoint and moves on when it can't connect, unless `setWsUrl()` was set. `activeRpcUrl()` shows the endpoint in use.
 
 ---
 
@@ -432,6 +445,13 @@ cd test/host
 ---
 
 ## 📝 Changelog
+
+### 1.3.0
+- On-device keys: BIP39 mnemonics, Phantom compatible derivation, PIN protected `KeyStore`
+- Device signatures: `ed25519SignIx`, `sendSignedData`, `verifySignature`
+- TLS certificate verification with built-in root CAs, `setRootCA`, `setTlsInsecure`
+- Low power: `LowPower` (fast reconnect, deep sleep, boot counter), `DataQueue`, `setTimeout`
+- RPC failover: `addRpcEndpoint`, `activeRpcUrl`
 
 ### 1.2.0
 - SPL token transfers (`sendSplToken`, `transferCheckedIx`), ATA derivation and idempotent creation, Token-2022

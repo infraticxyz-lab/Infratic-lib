@@ -50,6 +50,7 @@ struct InfraticWsState
     std::unique_ptr<WiFiClient> client;
     bool connected = false;
     bool autoReconnect = true;
+    bool followRpc = true; // false after setWsUrl()
     size_t maxMessage = 65536;
 
     std::vector<uint8_t> rx;
@@ -192,17 +193,22 @@ namespace
     }
 }
 
+static String wsUrlFor(const String &rpcUrl)
+{
+    String u = rpcUrl;
+    if (u.startsWith("https://")) u = "wss://" + u.substring(8);
+    else if (u.startsWith("http://")) u = "ws://" + u.substring(7);
+    int p = u.indexOf(":8899");
+    if (p > 0) u = u.substring(0, p) + ":8900" + u.substring(p + 5); // solana-test-validator
+    return u;
+}
+
 InfraticWsState &Infratic::ws()
 {
     if (!_ws)
     {
         _ws = std::make_shared<InfraticWsState>();
-        String u = _rpcUrl;
-        if (u.startsWith("https://")) u = "wss://" + u.substring(8);
-        else if (u.startsWith("http://")) u = "ws://" + u.substring(7);
-        int p = u.indexOf(":8899");
-        if (p > 0) u = u.substring(0, p) + ":8900" + u.substring(p + 5); // solana-test-validator
-        _ws->parseUrl(u);
+        _ws->parseUrl(wsUrlFor(_rpcUrl));
     }
     return *_ws;
 }
@@ -211,6 +217,7 @@ void Infratic::setWsUrl(const String &wsUrl)
 {
     InfraticWsState &s = ws();
     s.close();
+    s.followRpc = false;
     if (!s.parseUrl(wsUrl))
     {
         _logErr.println("❌ Invalid WebSocket URL: " + wsUrl);
@@ -227,6 +234,21 @@ void Infratic::onLogs(LogsCallback cb) { ws().onLogs = cb; }
 void Infratic::onSignature(SignatureCallback cb) { ws().onSignature = cb; }
 
 bool Infratic::wsConnect()
+{
+    size_t tries = ws().followRpc ? _rpcUrls.size() : 1;
+    for (size_t i = 0; i < tries; i++)
+    {
+        if (_ws->followRpc)
+        {
+            _ws->parseUrl(wsUrlFor(_rpcUrl)); // follow the active RPC endpoint
+        }
+        if (wsConnectOnce()) return true;
+        if (i + 1 < tries) useRpc((_activeRpc + 1) % _rpcUrls.size());
+    }
+    return false;
+}
+
+bool Infratic::wsConnectOnce()
 {
     InfraticWsState &s = ws();
     s.close();

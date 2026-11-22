@@ -256,6 +256,7 @@ std::vector<uint8_t> base58ToPubkey(const String &base58Str)
 Infratic::Infratic(const String &rpcUrl)
 {
     _rpcUrl = rpcUrl;
+    _rpcUrls.push_back(rpcUrl);
 }
 
 // ============================================================================

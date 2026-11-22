@@ -1,6 +1,6 @@
 {
   "name": "Infratic",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Solana blockchain library for ESP32 - SPL tokens, priority fees, durable nonce, WebSocket subscriptions, Anchor events, v0 transactions, x402 escrow",
   "keywords": ["solana", "esp32", "blockchain", "anchor", "iot", "spl-token", "web3", "depin", "escrow", "x402"],
   "authors": [
