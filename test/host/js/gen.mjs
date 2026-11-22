@@ -1,7 +1,7 @@
 // Generates reference vectors with @solana/web3.js for the host tests.
 // Run: npm install && node gen.mjs > ../vectors.json
 import {
-  Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction,
+  Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, ComputeBudgetProgram,
 } from '@solana/web3.js';
 import bs58 from 'bs58';
 import {
@@ -202,6 +202,19 @@ for (const prog of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
       mint: mint.toBase58(), program: prog.toBase58(), amount: amount.toString(), decimals, createAta,
       blockhash: bh, message: hex(tx.serializeMessage()) });
   }
+}
+
+// ---- compute budget ---------------------------------------------------------------
+{
+  const a = kp(); const to = key(); const bh = blockhash();
+  const limit = ComputeBudgetProgram.setComputeUnitLimit({ units: 200000 });
+  const price = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 25000 });
+  const tx = new Transaction({ recentBlockhash: bh, feePayer: a.publicKey })
+    .add(limit).add(price).add(SystemProgram.transfer({ fromPubkey: a.publicKey, toPubkey: to, lamports: 777 }));
+  tx.sign(a);
+  out.computeBudget = { limitData: hex(limit.data), priceData: hex(price.data), program: limit.programId.toBase58(),
+    send: { secret: bs58.encode(a.secretKey), from: a.publicKey.toBase58(), to: to.toBase58(), lamports: 777,
+      blockhash: bh, tx: tx.serialize().toString('base64') } };
 }
 
 process.stdout.write(JSON.stringify(out));

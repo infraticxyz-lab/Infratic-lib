@@ -34,6 +34,7 @@ bool Infratic::signAndSend(Transaction &tx, const std::vector<Keypair> &signers,
         }
     }
 
+    applyPriorityFee(tx);
     if (!tx.sign(signers))
     {
         return false;

@@ -1248,6 +1248,8 @@ bool Infratic::buildAndSignTransaction(const uint8_t *privateKey, size_t privLen
     tx.add(Instruction(Pubkey::fromBase58(SYSTEM_PROGRAM_B58),
                        {AccountMeta::writable(from, true), AccountMeta::writable(to, false)}, data));
 
+    applyPriorityFee(tx);
+
     if (!tx.sign({Keypair::fromPrivateKey(privateKey)}))
     {
         return false;
@@ -1279,6 +1281,8 @@ bool Infratic::buildAndSignMemoTransaction(const uint8_t *privateKey, size_t pri
     tx.fee_payer = Pubkey{std::vector<uint8_t>(fromPub, fromPub + 32)};
     tx.recent_blockhash = recentBlockhash;
     tx.add(Instruction(programId, {}, std::vector<uint8_t>(memoString.begin(), memoString.end())));
+
+    applyPriorityFee(tx);
 
     if (!tx.sign({Keypair::fromPrivateKey(privateKey)}))
     {
@@ -2474,6 +2478,7 @@ bool Infratic::initializeZKStorage(
     tx.fee_payer = authority;
     tx.recent_blockhash = blockhash;
     tx.add(ix);
+    applyPriorityFee(tx);
     tx.sign({signer});
 
     String txBase64 = tx.serializeBase64();
@@ -2563,6 +2568,7 @@ bool Infratic::storeCommitmentInAnchor(
     tx.fee_payer = authority;
     tx.recent_blockhash = blockhash;
     tx.add(ix);
+    applyPriorityFee(tx);
     tx.sign({signer});
 
     String txBase64 = tx.serializeBase64();
@@ -2648,6 +2654,7 @@ bool Infratic::updateCommitmentInAnchor(
     tx.fee_payer = authority;
     tx.recent_blockhash = blockhash;
     tx.add(ix);
+    applyPriorityFee(tx);
     tx.sign({signer});
 
     String txBase64 = tx.serializeBase64();
@@ -2735,6 +2742,7 @@ bool Infratic::storeMerkleRootInAnchor(
     tx.fee_payer = authority;
     tx.recent_blockhash = blockhash;
     tx.add(ix);
+    applyPriorityFee(tx);
     tx.sign({signer});
 
     String txBase64 = tx.serializeBase64();
@@ -2826,6 +2834,7 @@ bool Infratic::storeBatchInAnchor(
     tx.fee_payer = authority;
     tx.recent_blockhash = blockhash;
     tx.add(ix);
+    applyPriorityFee(tx);
     tx.sign({signer});
 
     String txBase64 = tx.serializeBase64();
@@ -3116,6 +3125,7 @@ EscrowCreateResult Infratic::escrow_create(
     tx.fee_payer = buyer;
     tx.recent_blockhash = blockhash;
     tx.add(ix);
+    applyPriorityFee(tx);
     tx.sign({buyerKeypair});
 
     String txSignature;
@@ -3219,6 +3229,7 @@ EscrowTxResult Infratic::escrow_confirmDelivery(
     tx.fee_payer = seller;
     tx.recent_blockhash = blockhash;
     tx.add(ix);
+    applyPriorityFee(tx);
     tx.sign({sellerKeypair});
 
     String txSignature;
@@ -3317,6 +3328,7 @@ EscrowTxResult Infratic::escrow_release(
     tx.fee_payer = buyer;
     tx.recent_blockhash = blockhash;
     tx.add(ix);
+    applyPriorityFee(tx);
     tx.sign({buyerKeypair});
 
     String txSignature;
@@ -3424,6 +3436,7 @@ EscrowTxResult Infratic::escrow_cancel(
     tx.fee_payer = buyer;
     tx.recent_blockhash = blockhash;
     tx.add(ix);
+    applyPriorityFee(tx);
     tx.sign({buyerKeypair});
 
     String txSignature;
@@ -3520,6 +3533,7 @@ EscrowTxResult Infratic::escrow_initiateDispute(
     tx.fee_payer = seller;
     tx.recent_blockhash = blockhash;
     tx.add(ix);
+    applyPriorityFee(tx);
     tx.sign({sellerKeypair});
 
     String txSignature;
@@ -3594,6 +3608,7 @@ EscrowTxResult Infratic::escrow_forceClose(
     tx.fee_payer = authority;
     tx.recent_blockhash = blockhash;
     tx.add(ix);
+    applyPriorityFee(tx);
     tx.sign({authorityKeypair});
 
     String txSignature;

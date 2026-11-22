@@ -20,6 +20,7 @@
 #define INFRATIC_TOKEN_PROGRAM_ID "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 #define INFRATIC_TOKEN_2022_PROGRAM_ID "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 #define INFRATIC_ASSOCIATED_TOKEN_PROGRAM_ID "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+#define INFRATIC_COMPUTE_BUDGET_PROGRAM_ID "ComputeBudget111111111111111111111111111111"
 
 /** Log levels for Infratic::setLogLevel() */
 enum InfraticLogLevel : uint8_t
@@ -375,6 +376,31 @@ public:
      */
     bool signAndSend(Transaction &tx, const std::vector<Keypair> &signers, String &outSignature,
                      uint32_t confirmWaitMs = 15000);
+
+    // ========================================================================
+    // PRIORITY FEES (Compute Budget)
+    // ========================================================================
+
+    /**
+     * @brief Adds a priority fee to every transaction the library builds
+     * @param microLamportsPerUnit Price per compute unit (0 = off)
+     * @param computeUnitLimit Optional compute unit limit (0 = runtime default)
+     */
+    void setPriorityFee(uint64_t microLamportsPerUnit, uint32_t computeUnitLimit = 0);
+
+    /** @brief Inserts the configured compute budget instructions (used internally, also for custom txs) */
+    void applyPriorityFee(Transaction &tx) const;
+
+    static Instruction setComputeUnitLimitIx(uint32_t units);
+    static Instruction setComputeUnitPriceIx(uint64_t microLamportsPerUnit);
+
+    /**
+     * @brief Suggests a priority fee from getRecentPrioritizationFees
+     * @param writableAccounts Accounts the tx will write (empty = global)
+     * @param percentile 0-100, e.g. 75 = pay more than 75% of recent slots
+     */
+    bool estimatePriorityFee(const std::vector<String> &writableAccounts, uint64_t &outMicroLamports,
+                             uint8_t percentile = 75);
 
     // ========================================================================
     // SPL TOKEN (Token Program and Token-2022)
@@ -897,6 +923,8 @@ public:
 
 private:
     String _rpcUrl;
+    uint64_t _priorityFeeMicroLamports = 0;
+    uint32_t _computeUnitLimit = 0;
 
     // Internal transaction building functions
     bool buildAndSignTransaction(const uint8_t *privateKey, size_t privLen,

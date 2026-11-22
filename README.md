@@ -19,6 +19,7 @@
 - ✅ Get SOL and SPL token balances, token decimals
 - ✅ Derive / find Associated Token Accounts
 - ✅ Transaction confirmation with retry logic
+- ✅ Priority fees (Compute Budget) on every transaction the library sends
 
 ### 🔐 Cryptography
 - ✅ Ed25519 signing
@@ -153,6 +154,22 @@ solana.getAccountData(accountAddress, raw);
 ```
 
 Use filters on ESP32: an unfiltered `getProgramAccounts` response can easily be larger than the available RAM.
+
+---
+
+## ⚡ Priority Fees
+
+When the network is busy, transactions without a priority fee are often dropped.
+
+```cpp
+uint64_t fee;
+if (solana.estimatePriorityFee({}, fee, 75)) {   // 75th percentile of recent slots
+    solana.setPriorityFee(fee, 200000);          // micro-lamports per CU, CU limit
+}
+// every transaction the library builds now includes the compute budget instructions
+```
+
+For your own transactions call `solana.applyPriorityFee(tx)` before signing, or add `Infratic::setComputeUnitLimitIx` / `setComputeUnitPriceIx` yourself.
 
 ---
 

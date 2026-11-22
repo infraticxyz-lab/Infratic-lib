@@ -315,6 +315,63 @@ static void testSpl(Infratic &sol, JsonObject spl)
     }
 }
 
+static void testComputeBudget(Infratic &sol, JsonObject c)
+{
+    g_group = "computeBudget";
+    Instruction lim = Infratic::setComputeUnitLimitIx(200000), pr = Infratic::setComputeUnitPriceIx(25000);
+    CHECK(toHex(lim.data) == c["limitData"].as<std::string>() && toHex(pr.data) == c["priceData"].as<std::string>(), "ix data");
+    CHECK(base58Encode(lim.programId.data.data(), 32) == c["program"].as<const char *>(), "program id");
+
+    // sendSol with a priority fee must match web3.js byte for byte
+    JsonObject t = c["send"];
+    std::string sent, bh = t["blockhash"].as<std::string>();
+    g_httpHandler = [&](const std::string &, const std::string &body) -> MockHttpResponse {
+        if (body.find("getLatestBlockhash") != std::string::npos)
+            return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":{\"blockhash\":\"" + bh + "\",\"lastValidBlockHeight\":100}}}"};
+        if (body.find("sendTransaction") != std::string::npos) {
+            DynamicJsonDocument d(4096); deserializeJson(d, body); sent = d["params"][0].as<std::string>();
+            return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"5sig\"}"};
+        }
+        if (body.find("getSignatureStatuses") != std::string::npos)
+            return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":[{\"confirmationStatus\":\"confirmed\",\"err\":null}]}}"};
+        if (body.find("getRecentPrioritizationFees") != std::string::npos)
+            return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[{\"slot\":1,\"prioritizationFee\":0},{\"slot\":2,\"prioritizationFee\":500},{\"slot\":3,\"prioritizationFee\":100},{\"slot\":4,\"prioritizationFee\":9000},{\"slot\":5,\"prioritizationFee\":200}]}"};
+        return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"};
+    };
+    sol.setPriorityFee(25000, 200000);
+    sol.sendSol(t["secret"].as<const char *>(), t["from"].as<const char *>(), t["to"].as<const char *>(), t["lamports"].as<uint64_t>());
+    {
+        auto decodeTx = [](const std::string &b64) {
+            std::vector<uint8_t> raw(b64.size()); size_t n = 0;
+            mbedtls_base64_decode(raw.data(), raw.size(), &n, (const unsigned char *)b64.data(), b64.size()); raw.resize(n);
+            return raw;
+        };
+        std::vector<uint8_t> ours = decodeTx(sent), want = decodeTx(t["tx"].as<std::string>());
+        CHECK(ours.size() > 65 && ours.size() == want.size(), "sendSol with priority fee size");
+        if (ours.size() > 65)
+        {
+            std::vector<uint8_t> m1(ours.begin() + 65, ours.end()), m2(want.begin() + 65, want.end());
+            DecodedMsg a = decodeMsg(m1), b = decodeMsg(m2);
+            CHECK(a.ok && a.canon == b.canon, "sendSol with priority fee message\n    want " + b.canon + "\n    got  " + a.canon);
+            CHECK(Ed25519::verify(ours.data() + 1, fromHex(a.keys[0]).data(), m1.data(), m1.size()), "sendSol with priority fee signature");
+        }
+    }
+
+    // a tx that already has a compute budget is left alone
+    Transaction tx;
+    tx.add(Infratic::setComputeUnitPriceIx(1));
+    sol.applyPriorityFee(tx);
+    CHECK(tx.instructions.size() == 1, "existing budget kept");
+    sol.setPriorityFee(0, 0);
+    Transaction tx2;
+    sol.applyPriorityFee(tx2);
+    CHECK(tx2.instructions.empty(), "fee off");
+
+    uint64_t fee = 0;
+    CHECK(sol.estimatePriorityFee({"So11111111111111111111111111111111111111112"}, fee, 75) && fee == 500, "estimate p75 " + std::to_string(fee));
+    CHECK(sol.estimatePriorityFee({}, fee, 100) && fee == 9000, "estimate max");
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -383,6 +440,7 @@ int main(int argc, char **argv) {
 #ifdef INFRATIC_VERSION
     testEscrowCreate(sol, doc["escrowCreate"]);
     testSpl(sol, doc["spl"]);
+    testComputeBudget(sol, doc["computeBudget"]);
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");
