@@ -15,8 +15,9 @@
 
 ### 🪙 Blockchain Operations
 - ✅ Send SOL (native Solana transfers)
+- ✅ Send SPL tokens (Token Program and Token-2022), create ATAs automatically
 - ✅ Get SOL and SPL token balances, token decimals
-- ✅ Find Associated Token Accounts
+- ✅ Derive / find Associated Token Accounts
 - ✅ Transaction confirmation with retry logic
 
 ### 🔐 Cryptography
@@ -152,6 +153,25 @@ solana.getAccountData(accountAddress, raw);
 ```
 
 Use filters on ESP32: an unfiltered `getProgramAccounts` response can easily be larger than the available RAM.
+
+---
+
+## 💸 SPL Tokens
+
+```cpp
+String sig;
+// 1.5 USDC (6 decimals) - the recipient ATA is created if missing
+solana.sendSplToken(PRIVATE_KEY, MY_PUBKEY, RECIPIENT_PUBKEY, USDC_MINT, 1500000, sig);
+
+// Token-2022 mint, decimals known
+solana.sendSplToken(PRIVATE_KEY, MY_PUBKEY, RECIPIENT_PUBKEY, MINT, 42, sig, 0, true,
+                    INFRATIC_TOKEN_2022_PROGRAM_ID);
+
+String ata;
+solana.getAssociatedTokenAddress(OWNER, MINT, ata); // no RPC call
+```
+
+`createAssociatedTokenAccountIdempotentIx` and `transferCheckedIx` return plain instructions, so they can be combined with your own instructions in one `Transaction` and sent with `signAndSend`.
 
 ---
 

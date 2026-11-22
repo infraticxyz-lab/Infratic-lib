@@ -4,6 +4,10 @@ import {
   Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction,
 } from '@solana/web3.js';
 import bs58 from 'bs58';
+import {
+  getAssociatedTokenAddressSync, createAssociatedTokenAccountIdempotentInstruction,
+  createTransferCheckedInstruction, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID,
+} from '@solana/spl-token';
 
 // deterministic PRNG so the vectors are stable
 let s = 0x9e3779b9;
@@ -176,6 +180,28 @@ out.escrowSpace = ESCROW_SPACE;
   tx.sign(buyer);
   out.escrowCreate = { secret: bs58.encode(buyer.secretKey), buyer: buyer.publicKey.toBase58(), seller: seller.toBase58(),
     orderId, amount, exp, blockhash: bh, pda: pda.toBase58(), message: hex(tx.serializeMessage()) };
+}
+
+// ---- SPL token -----------------------------------------------------------------
+out.spl = { ata: [], send: [] };
+for (const prog of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+  for (let i = 0; i < 20; i++) {
+    const owner = i % 2 ? kp().publicKey : key(); const mint = key();
+    out.spl.ata.push({ owner: owner.toBase58(), mint: mint.toBase58(), program: prog.toBase58(),
+      ata: getAssociatedTokenAddressSync(mint, owner, true, prog).toBase58() });
+  }
+  for (const createAta of [true, false]) {
+    const from = kp(); const to = key(); const mint = key(); const amount = 1234567890123n; const decimals = 6;
+    const src = getAssociatedTokenAddressSync(mint, from.publicKey, true, prog);
+    const dst = getAssociatedTokenAddressSync(mint, to, true, prog);
+    const bh = blockhash();
+    const tx = new Transaction({ recentBlockhash: bh, feePayer: from.publicKey });
+    if (createAta) tx.add(createAssociatedTokenAccountIdempotentInstruction(from.publicKey, dst, to, mint, prog));
+    tx.add(createTransferCheckedInstruction(src, mint, dst, from.publicKey, amount, decimals, [], prog));
+    out.spl.send.push({ secret: bs58.encode(from.secretKey), from: from.publicKey.toBase58(), to: to.toBase58(),
+      mint: mint.toBase58(), program: prog.toBase58(), amount: amount.toString(), decimals, createAta,
+      blockhash: bh, message: hex(tx.serializeMessage()) });
+  }
 }
 
 process.stdout.write(JSON.stringify(out));

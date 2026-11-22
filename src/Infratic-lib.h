@@ -15,6 +15,12 @@
 
 #define INFRATIC_VERSION "1.1.0"
 
+// Well-known program IDs
+#define INFRATIC_SYSTEM_PROGRAM_ID "11111111111111111111111111111111"
+#define INFRATIC_TOKEN_PROGRAM_ID "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+#define INFRATIC_TOKEN_2022_PROGRAM_ID "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+#define INFRATIC_ASSOCIATED_TOKEN_PROGRAM_ID "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+
 /** Log levels for Infratic::setLogLevel() */
 enum InfraticLogLevel : uint8_t
 {
@@ -64,6 +70,8 @@ struct Keypair
     std::vector<uint8_t> privkey;
 
     static Keypair fromPrivateKey(const uint8_t *key64);
+    /** @brief From a Base58 64-byte secret key (Phantom/Solana CLI format). Empty privkey on error. */
+    static Keypair fromBase58(const String &secretKeyBase58);
     const Pubkey &pubkey() const;
 };
 
@@ -356,6 +364,49 @@ public:
      * @return true if confirmed
      */
     bool confirmTransaction(const String &signature, uint32_t maxWaitMs = 5000);
+
+    /**
+     * @brief Fills fee payer / blockhash if empty, signs, sends and waits for confirmation
+     * @param tx Transaction (fee_payer defaults to the first signer)
+     * @param signers Every required signer
+     * @param outSignature Transaction signature
+     * @param confirmWaitMs 0 = don't wait for confirmation
+     * @return true if sent (and confirmed when confirmWaitMs > 0)
+     */
+    bool signAndSend(Transaction &tx, const std::vector<Keypair> &signers, String &outSignature,
+                     uint32_t confirmWaitMs = 15000);
+
+    // ========================================================================
+    // SPL TOKEN (Token Program and Token-2022)
+    // ========================================================================
+
+    /**
+     * @brief Derives the Associated Token Account address (no RPC call)
+     * @param tokenProgramId INFRATIC_TOKEN_PROGRAM_ID or INFRATIC_TOKEN_2022_PROGRAM_ID
+     */
+    bool getAssociatedTokenAddress(const String &ownerBase58, const String &mintBase58, String &outAta,
+                                   const String &tokenProgramId = INFRATIC_TOKEN_PROGRAM_ID);
+
+    /** @brief Instruction that creates an ATA, does nothing if it already exists */
+    static Instruction createAssociatedTokenAccountIdempotentIx(const Pubkey &payer, const Pubkey &ata,
+                                                                const Pubkey &owner, const Pubkey &mint,
+                                                                const Pubkey &tokenProgram);
+
+    /** @brief SPL TransferChecked instruction (amount in base units) */
+    static Instruction transferCheckedIx(const Pubkey &source, const Pubkey &mint, const Pubkey &destination,
+                                        const Pubkey &owner, uint64_t amount, uint8_t decimals,
+                                        const Pubkey &tokenProgram);
+
+    /**
+     * @brief Sends SPL tokens from the signer's ATA to the recipient's ATA
+     * @param amount Amount in base units (e.g. 1 USDC = 1000000)
+     * @param decimals Mint decimals, -1 = read from chain
+     * @param createDestinationAta Create the recipient ATA if it does not exist
+     */
+    bool sendSplToken(const String &privateKeyBase58, const String &fromOwnerBase58,
+                      const String &toOwnerBase58, const String &mintBase58, uint64_t amount,
+                      String &outSignature, int decimals = -1, bool createDestinationAta = true,
+                      const String &tokenProgramId = INFRATIC_TOKEN_PROGRAM_ID);
 
     // ========================================================================
     // GENERIC RPC

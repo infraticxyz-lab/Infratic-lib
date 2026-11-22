@@ -272,6 +272,49 @@ static void testEscrowCreate(Infratic &sol, JsonObject c)
                              1, String("x").s.append(40, 'y').c_str(), 10).success, "long order_id rejected");
 }
 
+static void testSpl(Infratic &sol, JsonObject spl)
+{
+    g_group = "spl";
+    for (JsonObject c : spl["ata"].as<JsonArray>())
+    {
+        String ata;
+        CHECK(sol.getAssociatedTokenAddress(c["owner"].as<const char *>(), c["mint"].as<const char *>(), ata,
+                                            c["program"].as<const char *>()) && ata == c["ata"].as<const char *>(),
+              "ATA " + ata.s + " want " + c["ata"].as<std::string>());
+    }
+    for (JsonObject c : spl["send"].as<JsonArray>())
+    {
+        std::string sent, bh = c["blockhash"].as<std::string>(), name = std::string("sendSplToken ") + (c["createAta"].as<bool>() ? "+ata " : "") + c["program"].as<std::string>().substr(0, 6);
+        bool askedDecimals = false;
+        g_httpHandler = [&](const std::string &, const std::string &body) -> MockHttpResponse {
+            auto has = [&](const char *m) { return body.find(m) != std::string::npos; };
+            if (has("getTokenSupply")) { askedDecimals = true; return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":{\"amount\":\"1\",\"decimals\":6,\"uiAmount\":1}}}"}; }
+            if (has("getLatestBlockhash")) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":{\"blockhash\":\"" + bh + "\",\"lastValidBlockHeight\":1000}}}"};
+            if (has("sendTransaction")) { DynamicJsonDocument d(8192); deserializeJson(d, body); sent = d["params"][0].as<std::string>(); return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"5sig\"}"}; }
+            if (has("getSignatureStatuses")) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":[{\"confirmationStatus\":\"confirmed\",\"err\":null}]}}"};
+            if (has("getBlockHeight")) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":10}"};
+            return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"};
+        };
+        String sig;
+        // second variant reads decimals from chain
+        int decimals = c["createAta"].as<bool>() ? c["decimals"].as<int>() : -1;
+        bool ok = sol.sendSplToken(c["secret"].as<const char *>(), c["from"].as<const char *>(), c["to"].as<const char *>(),
+                                   c["mint"].as<const char *>(), std::stoull(c["amount"].as<std::string>()), sig, decimals,
+                                   c["createAta"].as<bool>(), c["program"].as<const char *>());
+        CHECK(ok, name + " result");
+        CHECK(askedDecimals == (decimals < 0), name + " decimals lookup");
+        std::vector<uint8_t> raw(sent.size()); size_t n = 0;
+        mbedtls_base64_decode(raw.data(), raw.size(), &n, (const unsigned char *)sent.data(), sent.size()); raw.resize(n);
+        CHECK(raw.size() > 65 && raw[0] == 1, name + " one signature");
+        if (raw.size() <= 65) continue;
+        std::vector<uint8_t> msg(raw.begin() + 65, raw.end());
+        DecodedMsg a = decodeMsg(msg), b = decodeMsg(fromHex(c["message"].as<std::string>()));
+        CHECK(a.ok && a.canon == b.canon && a.header[0] == b.header[0] && a.header[1] == b.header[1] && a.header[2] == b.header[2],
+              name + " message\n    want " + b.canon + "\n    got  " + a.canon);
+        CHECK(Ed25519::verify(raw.data() + 1, fromHex(a.keys[0]).data(), msg.data(), msg.size()), name + " signature");
+    }
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -339,6 +382,7 @@ int main(int argc, char **argv) {
     testEscrowDecode(sol, doc["escrow"]);
 #ifdef INFRATIC_VERSION
     testEscrowCreate(sol, doc["escrowCreate"]);
+    testSpl(sol, doc["spl"]);
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");

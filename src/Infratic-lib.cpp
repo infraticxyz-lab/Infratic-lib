@@ -1,5 +1,4 @@
-#include "Infratic-lib.h"
-#include <stdarg.h>
+#include "infratic_internal.h"
 #include <mbedtls/version.h>
 
 // mbedtls 3.x (arduino-esp32 3.x / ESP-IDF 5) removed the *_ret variants
@@ -13,40 +12,21 @@
 // LOGGING
 // ============================================================================
 
-static uint8_t g_infraticLogLevel = INFRATIC_LOG_INFO;
-
-namespace
+namespace infratic_detail
 {
-    struct InfraticLog
-    {
-        uint8_t level;
-
-        bool on() const { return g_infraticLogLevel >= level; }
-        template <typename T>
-        void print(const T &v) { if (on()) Serial.print(v); }
-        template <typename T>
-        void println(const T &v) { if (on()) Serial.println(v); }
-        void println() { if (on()) Serial.println(); }
-        void printf(const char *fmt, ...) __attribute__((format(printf, 2, 3)))
-        {
-            if (!on()) return;
-            char buf[256];
-            va_list args;
-            va_start(args, fmt);
-            vsnprintf(buf, sizeof(buf), fmt, args);
-            va_end(args);
-            Serial.print(buf);
-        }
-    };
-
-    InfraticLog _logErr{INFRATIC_LOG_ERROR};
-    InfraticLog _logInfo{INFRATIC_LOG_INFO};
+    uint8_t logLevel = INFRATIC_LOG_INFO;
+    InfraticLog logErr{INFRATIC_LOG_ERROR};
+    InfraticLog logInfo{INFRATIC_LOG_INFO};
 }
 
 void Infratic::setLogLevel(uint8_t level)
 {
-    g_infraticLogLevel = level;
+    infratic_detail::logLevel = level;
 }
+
+using infratic_detail::toBase64;
+using infratic_detail::fromBase64;
+using infratic_detail::jsonCapacity;
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -242,7 +222,7 @@ void appendBorshString(std::vector<uint8_t> &buffer, const String &str)
     buffer.insert(buffer.end(), str.begin(), str.end());
 }
 
-static String toBase64(const uint8_t *data, size_t len)
+String infratic_detail::toBase64(const uint8_t *data, size_t len)
 {
     size_t requiredSize = 4 * ((len + 2) / 3);
     std::vector<unsigned char> outBuf(requiredSize + 1, 0);
@@ -832,7 +812,7 @@ bool Infratic::confirmTransaction(const String &signature, uint32_t maxWaitMs)
 // GENERIC RPC
 // ============================================================================
 
-static bool fromBase64(const char *in, std::vector<uint8_t> &out)
+bool infratic_detail::fromBase64(const char *in, std::vector<uint8_t> &out)
 {
     size_t inLen = strlen(in);
     size_t outLen = 0;
@@ -846,7 +826,7 @@ static bool fromBase64(const char *in, std::vector<uint8_t> &out)
     return true;
 }
 
-static size_t jsonCapacity(const String &response)
+size_t infratic_detail::jsonCapacity(const String &response)
 {
     // input strings are copied into the document, keep some room for nodes
     return response.length() + response.length() / 2 + 1024;

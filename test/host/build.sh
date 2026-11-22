@@ -28,7 +28,7 @@ for f in sha256 sha512 base64 platform_util constant_time; do cc_c "$MBED/librar
 for f in Ed25519 SHA512 Hash BigNumberUtil Curve25519 Crypto; do cc_x "$CRYPTO/$f.cpp" "-w"; done
 cc_x "$HERE/stubs/runtime.cpp"
 cc_x "$LIB/src/base58.cpp"
-cc_x "$LIB/src/Infratic-lib.cpp" "-Werror=return-type"
+for f in "$LIB"/src/*.cpp; do [ "$(basename "$f")" = base58.cpp ] && continue; cc_x "$f" "-Werror=return-type"; done
 cc_x "$HERE/test_main.cpp"
 g++ -o "$OUT/infratic_tests" "${objs[@]}" -Wl,--gc-sections
 echo "build ok"
