@@ -217,4 +217,29 @@ for (const prog of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
       blockhash: bh, tx: tx.serialize().toString('base64') } };
 }
 
+// ---- durable nonce -------------------------------------------------------------------
+{
+  const seeds = Array.from({ length: 5 }, () => bytes(32));
+  const fromSeed = seeds.map((sd) => ({ seed: hex(sd), pub: Keypair.fromSeed(sd).publicKey.toBase58() }));
+  const payer = kp(); const nonceKp = kp(); const authority = kp().publicKey; const rent = 1447680; const bh = blockhash();
+  const ctx = SystemProgram.createNonceAccount({ fromPubkey: payer.publicKey, noncePubkey: nonceKp.publicKey,
+    authorizedPubkey: authority, lamports: rent });
+  ctx.recentBlockhash = bh; ctx.feePayer = payer.publicKey;
+  const create = { payer: bs58.encode(payer.secretKey), nonce: bs58.encode(nonceKp.secretKey), authority: authority.toBase58(),
+    rent, blockhash: bh, message: hex(ctx.serializeMessage()) };
+
+  // nonce account data + a durable transfer with priority fee
+  const devKp = kp(); const nonceAcc = key(); const nonceValue = key(); const to = key();
+  const data = Buffer.alloc(80); data.writeUInt32LE(0, 0); data.writeUInt32LE(1, 4);
+  devKp.publicKey.toBuffer().copy(data, 8); nonceValue.toBuffer().copy(data, 40); data.writeBigUInt64LE(5000n, 72);
+  const dtx = new Transaction({ feePayer: devKp.publicKey, nonceInfo: { nonce: nonceValue.toBase58(),
+    nonceInstruction: SystemProgram.nonceAdvance({ noncePubkey: nonceAcc, authorizedPubkey: devKp.publicKey }) } });
+  dtx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }));
+  dtx.add(SystemProgram.transfer({ fromPubkey: devKp.publicKey, toPubkey: to, lamports: 4242 }));
+  dtx.sign(devKp);
+  out.nonce = { fromSeed, create, account: { address: nonceAcc.toBase58(), data: data.toString('base64'),
+    authority: devKp.publicKey.toBase58(), nonce: nonceValue.toBase58(), lamportsPerSignature: 5000 },
+    durable: { secret: bs58.encode(devKp.secretKey), to: to.toBase58(), lamports: 4242, message: hex(dtx.serializeMessage()) } };
+}
+
 process.stdout.write(JSON.stringify(out));

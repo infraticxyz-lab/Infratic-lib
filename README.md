@@ -20,6 +20,7 @@
 - ✅ Derive / find Associated Token Accounts
 - ✅ Transaction confirmation with retry logic
 - ✅ Priority fees (Compute Budget) on every transaction the library sends
+- ✅ Durable nonce: sign now, send later (no 60 s blockhash limit)
 
 ### 🔐 Cryptography
 - ✅ Ed25519 signing
@@ -170,6 +171,24 @@ if (solana.estimatePriorityFee({}, fee, 75)) {   // 75th percentile of recent sl
 ```
 
 For your own transactions call `solana.applyPriorityFee(tx)` before signing, or add `Infratic::setComputeUnitLimitIx` / `setComputeUnitPriceIx` yourself.
+
+---
+
+## 🔒 Durable Nonce
+
+A normal transaction must reach the network within ~60 seconds of fetching the blockhash. With a durable nonce a device can sign a transaction now and send it whenever it is online.
+
+```cpp
+// once: create a nonce account controlled by the device wallet
+Keypair nonceKp = Keypair::generate();          // save nonceKp.secretBase58() somewhere safe
+solana.createNonceAccount(PRIVATE_KEY, nonceKp, MY_PUBKEY, sig);
+
+// later: build any transaction and make it durable
+Transaction tx;
+tx.add(/* your instructions */);
+solana.useDurableNonce(tx, nonceKp.publicBase58(), MY_PUBKEY);
+solana.signAndSend(tx, {myKeypair}, sig);       // the nonce advances when it lands
+```
 
 ---
 

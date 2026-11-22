@@ -21,6 +21,8 @@
 #define INFRATIC_TOKEN_2022_PROGRAM_ID "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 #define INFRATIC_ASSOCIATED_TOKEN_PROGRAM_ID "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 #define INFRATIC_COMPUTE_BUDGET_PROGRAM_ID "ComputeBudget111111111111111111111111111111"
+#define INFRATIC_SYSVAR_RECENT_BLOCKHASHES_ID "SysvarRecentB1ockHashes11111111111111111111"
+#define INFRATIC_SYSVAR_RENT_ID "SysvarRent111111111111111111111111111111111"
 
 /** Log levels for Infratic::setLogLevel() */
 enum InfraticLogLevel : uint8_t
@@ -73,6 +75,14 @@ struct Keypair
     static Keypair fromPrivateKey(const uint8_t *key64);
     /** @brief From a Base58 64-byte secret key (Phantom/Solana CLI format). Empty privkey on error. */
     static Keypair fromBase58(const String &secretKeyBase58);
+    /** @brief Derives the keypair from a 32-byte ed25519 seed */
+    static Keypair fromSeed(const uint8_t seed[32]);
+    /** @brief New random keypair (ESP32 hardware RNG, keep WiFi/BT on for full entropy) */
+    static Keypair generate();
+    /** @brief 64-byte secret key as Base58 (same format as fromBase58) */
+    String secretBase58() const;
+    /** @brief Public key as Base58 */
+    String publicBase58() const;
     const Pubkey &pubkey() const;
 };
 
@@ -213,6 +223,16 @@ struct EscrowAccountResult
     EscrowAccount account;
     String errorMessage;
 };
+// Durable nonce account (80 bytes): version, state, authority, nonce, fee calculator
+static const size_t NONCE_ACCOUNT_SPACE = 80;
+
+struct NonceInfo
+{
+    String authority;                  // nonce authority (base58)
+    String nonce;                      // value to use as recent_blockhash
+    uint64_t lamportsPerSignature = 0; // fee calculator
+};
+
 // ============================================================================
 // RPC RESULT STRUCTURES
 // ============================================================================
@@ -401,6 +421,32 @@ public:
      */
     bool estimatePriorityFee(const std::vector<String> &writableAccounts, uint64_t &outMicroLamports,
                              uint8_t percentile = 75);
+
+    // ========================================================================
+    // DURABLE NONCE (sign now, send later)
+    // ========================================================================
+
+    /**
+     * @brief Creates and initializes a nonce account
+     * @param nonceAccount New keypair for the nonce account (e.g. Keypair::generate(), keep its secret)
+     * @param authorityBase58 Who can advance the nonce (usually the device wallet)
+     */
+    bool createNonceAccount(const String &payerPrivateKeyBase58, const Keypair &nonceAccount,
+                            const String &authorityBase58, String &outSignature);
+
+    /** @brief Reads the current nonce value and authority */
+    bool getNonce(const String &nonceAccountBase58, NonceInfo &outInfo);
+
+    /** @brief AdvanceNonceAccount instruction (must be the first instruction) */
+    static Instruction nonceAdvanceIx(const Pubkey &nonceAccount, const Pubkey &authority);
+
+    /**
+     * @brief Turns tx into a durable transaction: sets the nonce as blockhash and
+     * inserts the advance instruction first. Sign it now, send it any time later.
+     * @param nonce Optional nonce value; empty = read it from the chain
+     */
+    bool useDurableNonce(Transaction &tx, const String &nonceAccountBase58, const String &authorityBase58,
+                         const String &nonce = "");
 
     // ========================================================================
     // SPL TOKEN (Token Program and Token-2022)

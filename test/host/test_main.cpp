@@ -372,6 +372,75 @@ static void testComputeBudget(Infratic &sol, JsonObject c)
     CHECK(sol.estimatePriorityFee({}, fee, 100) && fee == 9000, "estimate max");
 }
 
+static void testNonce(Infratic &sol, JsonObject c)
+{
+    g_group = "nonce";
+    for (JsonObject f : c["fromSeed"].as<JsonArray>())
+    {
+        std::vector<uint8_t> seed = fromHex(f["seed"].as<std::string>());
+        Keypair k = Keypair::fromSeed(seed.data());
+        CHECK(k.publicBase58() == f["pub"].as<const char *>(), "fromSeed " + k.publicBase58().s);
+        CHECK(Keypair::fromBase58(k.secretBase58()).publicBase58() == k.publicBase58(), "secretBase58 round trip");
+    }
+    Keypair g1 = Keypair::generate(), g2 = Keypair::generate();
+    uint8_t gsig[64]; const uint8_t m[3] = {1, 2, 3};
+    Ed25519::sign(gsig, g1.privkey.data(), g1.privkey.data() + 32, m, 3);
+    CHECK(g1.publicBase58() != g2.publicBase58() && Ed25519::verify(gsig, g1.pubkey().data.data(), m, 3), "generate");
+
+    JsonObject cr = c["create"], acc = c["account"];
+    std::string sent, bh = cr["blockhash"].as<std::string>(), accData = acc["data"].as<std::string>();
+    g_httpHandler = [&](const std::string &, const std::string &body) -> MockHttpResponse {
+        auto has = [&](const char *x) { return body.find(x) != std::string::npos; };
+        if (has("getMinimumBalanceForRentExemption")) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":" + std::to_string(cr["rent"].as<uint64_t>()) + "}"};
+        if (has("getLatestBlockhash")) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":{\"blockhash\":\"" + bh + "\",\"lastValidBlockHeight\":1000}}}"};
+        if (has("getAccountInfo")) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":{\"data\":[\"" + accData + "\",\"base64\"],\"owner\":\"11111111111111111111111111111111\",\"lamports\":1447680}}}"};
+        if (has("sendTransaction")) { DynamicJsonDocument d(8192); deserializeJson(d, body); sent = d["params"][0].as<std::string>(); return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"5sig\"}"}; }
+        if (has("getSignatureStatuses")) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":[{\"confirmationStatus\":\"confirmed\",\"err\":null}]}}"};
+        if (has("getBlockHeight")) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":10}"};
+        return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"};
+    };
+    auto decodeSent = [&](int nsig, std::vector<uint8_t> &msg) {
+        std::vector<uint8_t> raw(sent.size()); size_t n = 0;
+        mbedtls_base64_decode(raw.data(), raw.size(), &n, (const unsigned char *)sent.data(), sent.size()); raw.resize(n);
+        if (raw.size() < (size_t)(1 + 64 * nsig) || raw[0] != nsig) return std::vector<uint8_t>();
+        msg.assign(raw.begin() + 1 + 64 * nsig, raw.end());
+        return raw;
+    };
+
+    String sig;
+    Keypair nonceKp = Keypair::fromBase58(cr["nonce"].as<const char *>());
+    CHECK(sol.createNonceAccount(cr["payer"].as<const char *>(), nonceKp, cr["authority"].as<const char *>(), sig), "createNonceAccount");
+    std::vector<uint8_t> msg, raw = decodeSent(2, msg);
+    DecodedMsg a = decodeMsg(msg), b = decodeMsg(fromHex(cr["message"].as<std::string>()));
+    CHECK(!raw.empty() && a.ok && a.canon == b.canon, "create message\n    want " + b.canon + "\n    got  " + a.canon);
+    bool sigsOk = !raw.empty();
+    for (int i = 0; sigsOk && i < 2; i++) sigsOk = Ed25519::verify(raw.data() + 1 + 64 * i, fromHex(a.keys[i]).data(), msg.data(), msg.size());
+    CHECK(sigsOk, "create: both signatures valid");
+
+    NonceInfo info;
+    CHECK(sol.getNonce(acc["address"].as<const char *>(), info) && info.nonce == acc["nonce"].as<const char *>() &&
+          info.authority == acc["authority"].as<const char *>() && info.lamportsPerSignature == 5000, "getNonce");
+
+    // durable transfer: advance first, then compute budget, then transfer
+    JsonObject d = c["durable"];
+    Keypair dev = Keypair::fromBase58(d["secret"].as<const char *>());
+    Transaction tx;
+    tx.fee_payer = dev.pubkey();
+    std::vector<uint8_t> data = encodeU32LE(2), lam = encodeU64LE(d["lamports"].as<uint64_t>());
+    data.insert(data.end(), lam.begin(), lam.end());
+    tx.add(Instruction(Pubkey::fromBase58("11111111111111111111111111111111"),
+                       {AccountMeta::writable(dev.pubkey(), true), AccountMeta::writable(Pubkey::fromBase58(d["to"].as<const char *>()), false)}, data));
+    CHECK(sol.useDurableNonce(tx, acc["address"].as<const char *>(), dev.publicBase58()), "useDurableNonce");
+    sol.setPriorityFee(1000);
+    sent.clear();
+    CHECK(sol.signAndSend(tx, {dev}, sig), "signAndSend durable");
+    sol.setPriorityFee(0);
+    raw = decodeSent(1, msg);
+    a = decodeMsg(msg); b = decodeMsg(fromHex(d["message"].as<std::string>()));
+    CHECK(!raw.empty() && a.ok && a.canon == b.canon, "durable message\n    want " + b.canon + "\n    got  " + a.canon);
+    CHECK(tx.recent_blockhash == acc["nonce"].as<const char *>(), "nonce used as blockhash");
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -441,6 +510,7 @@ int main(int argc, char **argv) {
     testEscrowCreate(sol, doc["escrowCreate"]);
     testSpl(sol, doc["spl"]);
     testComputeBudget(sol, doc["computeBudget"]);
+    testNonce(sol, doc["nonce"]);
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");
