@@ -11,6 +11,7 @@
 #include <mbedtls/base64.h>
 #include <mbedtls/sha1.h>
 #include <WiFiClient.h>
+#include <Preferences.h>
 #include <deque>
 #include <algorithm>
 
@@ -902,6 +903,72 @@ static void testVersioned(Infratic &sol, JsonObject c)
     CHECK(ixMatches(Infratic::extendLookupTableIx(Pubkey::fromBase58(cr["table"].as<const char *>()), auth, auth, newAddrs), ex["ix"]), "extendLookupTableIx");
 }
 
+static void testKeys(JsonArray cases)
+{
+    g_group = "keys";
+    for (JsonObject c : cases)
+    {
+        std::string m = c["mnemonic"].as<std::string>();
+        std::vector<uint8_t> ent = fromHex(c["entropy"].as<std::string>()), back;
+        String made;
+        CHECK(Mnemonic::fromEntropy(ent, made) && made == m.c_str(), "fromEntropy " + std::to_string(ent.size() * 8));
+        CHECK(Mnemonic::toEntropy(m.c_str(), back) && back == ent, "toEntropy");
+        uint8_t seed[64];
+        CHECK(Mnemonic::toSeed(m.c_str(), c["passphrase"].as<const char *>(), seed) &&
+              toHex(std::vector<uint8_t>(seed, seed + 64)) == c["seed"].as<std::string>(), "seed");
+        for (JsonObject a : c["accounts"].as<JsonArray>())
+        {
+            Keypair k = Keypair::fromMnemonic(m.c_str(), a["account"].as<uint32_t>(), c["passphrase"].as<const char *>());
+            CHECK(k.publicBase58() == a["pub"].as<const char *>(), "Phantom path account " + std::to_string(a["account"].as<int>()) + " " + k.publicBase58().s);
+        }
+    }
+    // extra spaces / upper case accepted, bad checksum and unknown words rejected
+    std::string first = cases[0]["mnemonic"].as<std::string>();
+    std::string messy = "  " + first + "  ";
+    for (auto &ch : messy) ch = toupper(ch);
+    CHECK(Mnemonic::isValid(messy.c_str()), "normalization");
+    std::string bad = first.substr(0, first.rfind(' ')) + " zoo";
+    CHECK(!Mnemonic::isValid(bad.c_str()), "bad checksum rejected");
+    CHECK(!Mnemonic::isValid("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon solanaa"), "unknown word rejected");
+    CHECK(!Mnemonic::isValid("abandon abandon abandon"), "short mnemonic rejected");
+    String g12 = Mnemonic::generate(12), g24 = Mnemonic::generate(24);
+    CHECK(Mnemonic::isValid(g12) && Mnemonic::isValid(g24) && g12 != g24 && std::count(g24.s.begin(), g24.s.end(), ' ') == 23, "generate 12/24");
+
+    // KeyStore
+    KeyStore ks("dev1");
+    ks.setKdfIterations(500); // fast for tests
+    ks.wipe();
+    CHECK(!ks.exists() && !ks.saveMnemonic(first.c_str(), "12"), "PIN length enforced");
+    CHECK(ks.saveMnemonic(first.c_str(), "1234") && ks.exists(), "saveMnemonic");
+    std::string blob(g_nvs["infratic_ks"]["dev1"].begin(), g_nvs["infratic_ks"]["dev1"].end());
+    std::vector<uint8_t> firstEnt = fromHex(cases[0]["entropy"].as<std::string>());
+    CHECK(blob.find(std::string(firstEnt.begin(), firstEnt.end())) == std::string::npos || firstEnt == std::vector<uint8_t>(16, 0), "entropy not in plain text");
+    Keypair k0;
+    CHECK(ks.unlock("1234", k0, 1) && k0.publicBase58() == cases[0]["accounts"][1]["pub"].as<const char *>(), "unlock account 1");
+    String back;
+    CHECK(ks.unlockMnemonic("1234", back) && back == first.c_str(), "unlockMnemonic");
+    CHECK(!ks.unlock("0000", k0) && ks.failedAttempts() == 1, "wrong PIN counted");
+    CHECK(ks.unlock("1234", k0) && ks.failedAttempts() == 0, "counter reset on success");
+    CHECK(ks.changePin("1234", "98765") && !ks.unlock("1234", k0) && ks.unlock("98765", k0), "changePin");
+    ks.setMaxAttempts(3);
+    ks.unlock("1", k0); ks.unlock("2", k0);
+    CHECK(ks.exists(), "still there after 2 wrong PINs");
+    ks.unlock("3", k0);
+    CHECK(!ks.exists(), "wiped after 3 wrong PINs");
+
+    KeyStore raw("raw");
+    raw.setKdfIterations(500);
+    uint8_t s32[32]; for (int i = 0; i < 32; i++) s32[i] = i * 7;
+    Keypair want = Keypair::fromSeed(s32), got;
+    CHECK(raw.saveSeed(s32, "pin-abc") && raw.unlock("pin-abc", got) && got.publicBase58() == want.publicBase58(), "saveSeed/unlock");
+    std::string rawBlob(g_nvs["infratic_ks"]["raw"].begin(), g_nvs["infratic_ks"]["raw"].end());
+    CHECK(rawBlob.find(std::string((const char *)s32, 32)) == std::string::npos, "seed not stored in plain text");
+    CHECK(!raw.unlockMnemonic("pin-abc", back), "seed slot has no mnemonic");
+    // tampering is detected
+    g_nvs["infratic_ks"]["raw"].back() ^= 1;
+    CHECK(!raw.unlock("pin-abc", got), "tampered blob rejected");
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -976,6 +1043,7 @@ int main(int argc, char **argv) {
     testWebSocket(sol);
     testAnchorEvents(sol, doc["events"]);
     testVersioned(sol, doc["v0"]);
+    testKeys(doc["bip39"]);
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");

@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include <random>
 #include <chrono>
 
@@ -8,6 +9,7 @@ HardwareSerial Serial;
 WiFiClass WiFi;
 bool g_serialQuiet = true;
 MockSocket *g_mockSocket = nullptr;
+std::map<std::string, std::map<std::string, std::vector<uint8_t>>> g_nvs;
 std::function<MockHttpResponse(const std::string &, const std::string &)> g_httpHandler;
 
 static unsigned long g_fakeMillis = 0;

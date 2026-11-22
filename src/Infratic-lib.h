@@ -86,7 +86,69 @@ struct Keypair
     String secretBase58() const;
     /** @brief Public key as Base58 */
     String publicBase58() const;
+    /**
+     * @brief Derives a wallet from a BIP39 mnemonic, Phantom / Solflare compatible
+     * Path m/44'/501'/account'/0'. Empty privkey if the mnemonic is invalid.
+     */
+    static Keypair fromMnemonic(const String &mnemonic, uint32_t account = 0, const String &passphrase = "");
     const Pubkey &pubkey() const;
+};
+
+// ============================================================================
+// ON-DEVICE KEYS (BIP39 + encrypted storage)
+// ============================================================================
+
+/** BIP39 mnemonic helpers (English wordlist) */
+class Mnemonic
+{
+public:
+    /** @brief New random mnemonic, 12 or 24 words (ESP32 hardware RNG) */
+    static String generate(uint8_t words = 12);
+    static bool fromEntropy(const std::vector<uint8_t> &entropy, String &outMnemonic);
+    /** @brief Checks words and checksum, returns the entropy */
+    static bool toEntropy(const String &mnemonic, std::vector<uint8_t> &outEntropy);
+    static bool isValid(const String &mnemonic);
+    /** @brief 64-byte BIP39 seed (PBKDF2-HMAC-SHA512, 2048 rounds) */
+    static bool toSeed(const String &mnemonic, const String &passphrase, uint8_t outSeed[64]);
+    /** @brief SLIP-0010 ed25519 derivation, all indexes hardened */
+    static bool deriveEd25519(const uint8_t seed[64], const std::vector<uint32_t> &path, uint8_t outKey[32]);
+};
+
+/**
+ * PIN protected key storage in NVS (flash). The secret is encrypted with
+ * AES-256-GCM using a key derived from the PIN (PBKDF2-HMAC-SHA256).
+ * After too many wrong PINs the wallet is wiped.
+ */
+class KeyStore
+{
+public:
+    /** @param name Wallet slot name, max 12 characters */
+    explicit KeyStore(const String &name = "wallet");
+
+    bool exists();
+    /** @brief Stores a mnemonic (as BIP39 entropy). Overwrites the slot. */
+    bool saveMnemonic(const String &mnemonic, const String &pin);
+    /** @brief Stores a single 32-byte ed25519 seed (non-HD key) */
+    bool saveSeed(const uint8_t seed[32], const String &pin);
+    /** @brief Decrypts and returns the keypair (account index is used for mnemonics) */
+    bool unlock(const String &pin, Keypair &outKeypair, uint32_t account = 0, const String &passphrase = "");
+    /** @brief Returns the stored mnemonic (only for mnemonic slots), e.g. to show a backup */
+    bool unlockMnemonic(const String &pin, String &outMnemonic);
+    bool changePin(const String &oldPin, const String &newPin);
+    bool wipe();
+
+    uint8_t failedAttempts();
+    /** @brief Wipe after this many wrong PINs in a row (0 = never, default 10) */
+    void setMaxAttempts(uint8_t attempts) { _maxAttempts = attempts; }
+    /** @brief PBKDF2 rounds for new saves (default 20000, ~1-2 s on ESP32) */
+    void setKdfIterations(uint32_t iterations) { _iterations = iterations; }
+
+private:
+    String _name;
+    uint8_t _maxAttempts = 10;
+    uint32_t _iterations = 20000;
+    bool save(uint8_t type, const std::vector<uint8_t> &secret, const String &pin);
+    bool decrypt(const String &pin, uint8_t &outType, std::vector<uint8_t> &outSecret);
 };
 
 struct AccountMeta

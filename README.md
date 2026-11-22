@@ -23,7 +23,9 @@
 - ✅ Priority fees (Compute Budget) on every transaction the library sends
 - ✅ Durable nonce: sign now, send later (no 60 s blockhash limit)
 
-### 🔐 Cryptography
+### 🔐 Cryptography & Keys
+- ✅ BIP39 mnemonics (12/24 words) with Phantom/Solflare compatible derivation
+- ✅ PIN protected key storage on the device (AES-256-GCM in NVS, wipe after wrong PINs)
 - ✅ Ed25519 signing
 - ✅ Base58 encoding/decoding
 - ✅ Message signing with Base58 or raw binary keys
@@ -159,6 +161,27 @@ solana.getAccountData(accountAddress, raw);
 ```
 
 Use filters on ESP32: an unfiltered `getProgramAccounts` response can easily be larger than the available RAM.
+
+---
+
+## 🔑 On-Device Wallet Keys
+
+Generate the wallet on the device, back it up as 12/24 words, keep it encrypted with a PIN.
+
+```cpp
+KeyStore store("wallet");
+if (!store.exists()) {
+    String words = Mnemonic::generate(24);   // show once for backup
+    store.saveMnemonic(words, "4821");
+}
+
+Keypair wallet;
+if (store.unlock("4821", wallet)) {          // account 0 -> same address as in Phantom
+    Serial.println(wallet.publicBase58());
+}
+```
+
+The secret is encrypted with AES-256-GCM using a key derived from the PIN (PBKDF2-HMAC-SHA256, 20000 rounds). After 10 wrong PINs the slot is wiped (`setMaxAttempts`). For production devices also enable ESP32 flash encryption so the NVS partition can't be read from a flash dump.
 
 ---
 

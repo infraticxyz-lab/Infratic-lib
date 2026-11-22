@@ -5,6 +5,8 @@ import {
   TransactionMessage, VersionedTransaction, AddressLookupTableAccount, AddressLookupTableProgram,
 } from '@solana/web3.js';
 import bs58 from 'bs58';
+import * as bip39 from 'bip39';
+import edhd from 'ed25519-hd-key';
 import {
   getAssociatedTokenAddressSync, createAssociatedTokenAccountIdempotentInstruction,
   createTransferCheckedInstruction, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID,
@@ -317,6 +319,23 @@ for (const prog of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
     addresses: table.state.addresses.map((a) => a.toBase58()) },
     create: { authority: payer.publicKey.toBase58(), slot: 123456789, table: tableAddr.toBase58(), ix: ixJson(createIx) },
     extend: { ix: ixJson(extendIx), addresses: [w[0].toBase58(), r[0].toBase58()] } };
+}
+
+// ---- BIP39 / SLIP-0010 (Phantom path m/44'/501'/n'/0') --------------------------------------
+{
+  const cases = [];
+  const ents = [Buffer.alloc(16, 0), ...[16, 20, 24, 28, 32, 16, 32].map((n) => Buffer.from(bytes(n)))];
+  ents.forEach((ent, i) => {
+    const mnemonic = bip39.entropyToMnemonic(ent);
+    const passphrase = i % 3 === 1 ? 'TREZOR' : '';
+    const seed = bip39.mnemonicToSeedSync(mnemonic, passphrase);
+    const accounts = [0, 1, 7].map((a) => {
+      const k = edhd.derivePath(`m/44'/501'/${a}'/0'`, seed.toString('hex')).key;
+      return { account: a, pub: Keypair.fromSeed(k).publicKey.toBase58() };
+    });
+    cases.push({ entropy: hex(ent), mnemonic, passphrase, seed: seed.toString('hex'), accounts });
+  });
+  out.bip39 = cases;
 }
 
 process.stdout.write(JSON.stringify(out));
