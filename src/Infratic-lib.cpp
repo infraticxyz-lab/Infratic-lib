@@ -2934,65 +2934,6 @@ EscrowAccountResult Infratic::getEscrowAccount(const String &escrowPdaBase58, co
     return {true, account, ""};
 }
 
-namespace
-{
-    // Sequential little-endian / Borsh reader with bounds checks
-    struct BorshReader
-    {
-        const std::vector<uint8_t> &buf;
-        size_t pos;
-        bool ok;
-
-        BorshReader(const std::vector<uint8_t> &data, size_t start) : buf(data), pos(start), ok(true) {}
-
-        bool need(size_t n)
-        {
-            if (pos + n > buf.size()) ok = false;
-            return ok;
-        }
-        uint8_t u8()
-        {
-            return need(1) ? buf[pos++] : 0;
-        }
-        uint64_t u64()
-        {
-            if (!need(8)) return 0;
-            uint64_t v = 0;
-            for (int i = 0; i < 8; i++) v |= (uint64_t)buf[pos + i] << (8 * i);
-            pos += 8;
-            return v;
-        }
-        uint32_t u32()
-        {
-            if (!need(4)) return 0;
-            uint32_t v = 0;
-            for (int i = 0; i < 4; i++) v |= (uint32_t)buf[pos + i] << (8 * i);
-            pos += 4;
-            return v;
-        }
-        String pubkey()
-        {
-            if (!need(32)) return "";
-            String s = base58Encode(buf.data() + pos, 32);
-            pos += 32;
-            return s;
-        }
-        // Borsh strings are NOT padded to max_len: u32 length + bytes, then next field
-        String str(size_t maxLen)
-        {
-            uint32_t len = u32();
-            if (!ok || len > maxLen || !need(len))
-            {
-                ok = false;
-                return "";
-            }
-            String s((const char *)buf.data() + pos, len);
-            pos += len;
-            return s;
-        }
-    };
-}
-
 bool Infratic::deserializeEscrowAccount(const std::vector<uint8_t> &data, EscrowAccount &outAccount)
 {
     // 8 byte Anchor discriminator + fields in Rust struct order
@@ -3003,7 +2944,7 @@ bool Infratic::deserializeEscrowAccount(const std::vector<uint8_t> &data, Escrow
         return false;
     }
 
-    BorshReader r{data, ANCHOR_DISCRIMINATOR_SIZE};
+    BorshReader r(data, ANCHOR_DISCRIMINATOR_SIZE);
     outAccount.buyer = r.pubkey();
     outAccount.seller = r.pubkey();
     outAccount.amount = r.u64();

@@ -242,4 +242,32 @@ for (const prog of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
     durable: { secret: bs58.encode(devKp.secretKey), to: to.toBase58(), lamports: 4242, message: hex(dtx.serializeMessage()) } };
 }
 
+// ---- anchor events -----------------------------------------------------------------
+{
+  const { createHash } = await import('node:crypto');
+  const d8 = (pre, n) => createHash('sha256').update(`${pre}:${n}`).digest().subarray(0, 8);
+  const PROG = 'GmHx2yxARZ9ZxQwjceRWMBTXykJo6onZjrkraf4a4zvY';
+  const node = key(); const user = key(); const other = key();
+  const fulfilled = Buffer.concat([d8('event', 'RequestFulfilled'), u64le(42), node.toBuffer(), str('a1b2c3d4e5'),
+    u64le(1000000), i64le(1762600123)]);
+  const created = Buffer.concat([d8('event', 'RequestCreated'), u64le(43), user.toBuffer(), node.toBuffer(),
+    u64le(1000000), i64le(-5)]);
+  const inner = Buffer.concat([d8('event', 'SomethingElse'), u64le(7)]);
+  const logs = [
+    `Program ${PROG} invoke [1]`,
+    'Program log: Instruction: FulfillRequest',
+    `Program data: ${fulfilled.toString('base64')}`,
+    `Program ${other.toBase58()} invoke [2]`,
+    `Program data: ${inner.toString('base64')}`,
+    `Program ${other.toBase58()} consumed 100 of 200000 compute units`,
+    `Program ${other.toBase58()} success`,
+    `Program data: ${created.toString('base64')}`,
+    `Program ${PROG} consumed 5000 of 200000 compute units`,
+    `Program ${PROG} success`,
+  ];
+  out.events = { program: PROG, other: other.toBase58(), node: node.toBase58(), user: user.toBase58(), logs,
+    fulfilledData: hex(fulfilled.subarray(8)), accountRequest: hex(d8('account', 'Request')),
+    eventFulfilled: hex(d8('event', 'RequestFulfilled')) };
+}
+
 process.stdout.write(JSON.stringify(out));

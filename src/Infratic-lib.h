@@ -236,6 +236,66 @@ struct NonceInfo
 };
 
 // ============================================================================
+// BORSH (Anchor serialization)
+// ============================================================================
+
+/** Sequential little-endian / Borsh reader with bounds checks. `ok` turns false on any overrun. */
+class BorshReader
+{
+public:
+    BorshReader(const std::vector<uint8_t> &data, size_t start = 0) : buf(data), pos(start), ok(true) {}
+
+    uint8_t u8();
+    uint16_t u16();
+    uint32_t u32();
+    uint64_t u64();
+    int64_t i64();
+    bool boolean();
+    String pubkey();                       // 32 bytes -> base58
+    std::vector<uint8_t> bytes(size_t n);  // fixed size array
+    String str(size_t maxLen = 65535);     // u32 length + utf8 (not padded)
+    std::vector<uint8_t> vecU8();          // u32 length + bytes
+    size_t remaining() const { return pos < buf.size() ? buf.size() - pos : 0; }
+
+    const std::vector<uint8_t> &buf;
+    size_t pos;
+    bool ok;
+
+private:
+    bool need(size_t n);
+};
+
+/** Builds Borsh encoded instruction arguments. */
+class BorshWriter
+{
+public:
+    BorshWriter &u8(uint8_t v);
+    BorshWriter &u16(uint16_t v);
+    BorshWriter &u32(uint32_t v);
+    BorshWriter &u64(uint64_t v);
+    BorshWriter &i64(int64_t v);
+    BorshWriter &boolean(bool v);
+    BorshWriter &pubkey(const String &base58);
+    BorshWriter &bytes(const std::vector<uint8_t> &v); // fixed size, no length prefix
+    BorshWriter &str(const String &s);
+    BorshWriter &vecU8(const std::vector<uint8_t> &v);
+
+    std::vector<uint8_t> data;
+};
+
+/** An Anchor event (emit!) found in transaction logs */
+struct AnchorEvent
+{
+    String programId;
+    std::vector<uint8_t> discriminator; // first 8 bytes
+    std::vector<uint8_t> data;          // fields after the discriminator
+
+    /** @brief True if this is the event with the given Rust struct name */
+    bool is(const String &eventName) const;
+    BorshReader reader() const { return BorshReader(data); }
+};
+
+// ============================================================================
 // TRANSACTION ERRORS
 // ============================================================================
 
@@ -511,6 +571,25 @@ public:
 
     /** @brief Call often from loop(): reads messages, runs callbacks, keeps the socket alive */
     void wsLoop();
+
+    // ========================================================================
+    // ANCHOR EVENTS
+    // ========================================================================
+
+    /** @brief sha256("event:<Name>")[0..8] */
+    static std::vector<uint8_t> eventDiscriminator(const String &eventName);
+    /** @brief sha256("account:<Name>")[0..8], the first 8 bytes of an Anchor account */
+    static std::vector<uint8_t> accountDiscriminator(const String &accountName);
+
+    /**
+     * @brief Extracts emit! events ("Program data:" lines) from transaction logs
+     * @param programIdFilter Only events of this program (empty = all)
+     */
+    static bool parseAnchorEvents(const std::vector<String> &logs, std::vector<AnchorEvent> &outEvents,
+                                  const String &programIdFilter = "");
+
+    /** @brief Log messages of a confirmed transaction */
+    bool getTransactionLogs(const String &signature, std::vector<String> &outLogs);
 
     // ========================================================================
     // DURABLE NONCE (sign now, send later)

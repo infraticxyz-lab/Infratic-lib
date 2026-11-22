@@ -695,6 +695,56 @@ static void testWebSocket(Infratic &sol)
     g_mockSocket = nullptr;
 }
 
+static void testAnchorEvents(Infratic &sol, JsonObject c)
+{
+    g_group = "events";
+    CHECK(toHex(Infratic::eventDiscriminator("RequestFulfilled")) == c["eventFulfilled"].as<std::string>(), "event discriminator");
+    CHECK(toHex(Infratic::accountDiscriminator("Request")) == c["accountRequest"].as<std::string>(), "account discriminator");
+
+    std::vector<String> logs;
+    for (JsonVariant l : c["logs"].as<JsonArray>()) logs.push_back(l.as<const char *>());
+
+    std::vector<AnchorEvent> all, mine;
+    CHECK(Infratic::parseAnchorEvents(logs, all) && all.size() == 3, "all events " + std::to_string(all.size()));
+    CHECK(all.size() == 3 && all[1].programId == c["other"].as<const char *>() && all[2].programId == c["program"].as<const char *>(),
+          "events attributed to the right program (inner invoke)");
+    CHECK(Infratic::parseAnchorEvents(logs, mine, c["program"].as<const char *>()) && mine.size() == 2, "program filter");
+
+    if (mine.size() == 2)
+    {
+        CHECK(mine[0].is("RequestFulfilled") && !mine[0].is("RequestCreated") && mine[1].is("RequestCreated"), "event names");
+        BorshReader r = mine[0].reader();
+        uint64_t id = r.u64(); String node = r.pubkey(); String enc = r.str(512); uint64_t reward = r.u64(); int64_t ts = r.i64();
+        CHECK(r.ok && r.remaining() == 0 && id == 42 && node == c["node"].as<const char *>() && enc == "a1b2c3d4e5" &&
+              reward == 1000000 && ts == 1762600123, "RequestFulfilled fields");
+        BorshReader r2 = mine[1].reader();
+        uint64_t id2 = r2.u64(); String user = r2.pubkey(); String node2 = r2.pubkey(); r2.u64(); int64_t ts2 = r2.i64();
+        CHECK(r2.ok && id2 == 43 && user == c["user"].as<const char *>() && node2 == c["node"].as<const char *>() && ts2 == -5, "RequestCreated fields");
+        r2.u8();
+        CHECK(!r2.ok, "reader overrun flagged");
+
+        BorshWriter w;
+        w.u64(42).pubkey(c["node"].as<const char *>()).str("a1b2c3d4e5").u64(1000000).i64(1762600123);
+        CHECK(toHex(w.data) == c["fulfilledData"].as<std::string>(), "BorshWriter matches");
+    }
+    BorshWriter w2;
+    w2.u8(1).u16(0x0203).u32(4).boolean(true).vecU8({9, 9}).bytes({7});
+    CHECK(toHex(w2.data) == "0103020400000001020000000909" "07", "BorshWriter primitives " + toHex(w2.data));
+
+    // getTransactionLogs
+    std::string logsJson = "[";
+    for (size_t i = 0; i < logs.size(); i++) logsJson += (i ? ",\"" : "\"") + logs[i].s + "\"";
+    logsJson += "]";
+    g_httpHandler = [&](const std::string &, const std::string &body) -> MockHttpResponse {
+        if (body.find("getTransaction") != std::string::npos && body.find("SIG_OK") != std::string::npos)
+            return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"slot\":5,\"transaction\":{\"signatures\":[\"SIG_OK\"]},\"meta\":{\"err\":null,\"logMessages\":" + logsJson + "}}}"};
+        return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"};
+    };
+    std::vector<String> fetched;
+    CHECK(sol.getTransactionLogs("SIG_OK", fetched) && fetched.size() == logs.size() && fetched[2] == logs[2], "getTransactionLogs");
+    CHECK(!sol.getTransactionLogs("SIG_MISSING", fetched), "missing transaction");
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -767,6 +817,7 @@ int main(int argc, char **argv) {
     testNonce(sol, doc["nonce"]);
     testSendReliability(sol);
     testWebSocket(sol);
+    testAnchorEvents(sol, doc["events"]);
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");

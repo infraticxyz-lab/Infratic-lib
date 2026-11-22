@@ -30,7 +30,8 @@
 
 ### 🎯 Programs & Transactions
 - ✅ PDA (Program Derived Address) derivation, identical to `@solana/web3.js`
-- ✅ Anchor discriminator calculation and Borsh helpers
+- ✅ Anchor discriminators, `BorshReader` / `BorshWriter`
+- ✅ Anchor events (`emit!`) from transaction logs or live log subscriptions
 - ✅ Custom instructions, multi-instruction and multi-signer transactions
 - ✅ x402 escrow client (create, confirm delivery, release, cancel, dispute, force close)
 
@@ -252,6 +253,32 @@ solana.getAssociatedTokenAddress(OWNER, MINT, ata); // no RPC call
 ```
 
 `createAssociatedTokenAccountIdempotentIx` and `transferCheckedIx` return plain instructions, so they can be combined with your own instructions in one `Transaction` and sent with `signAndSend`.
+
+---
+
+## 📣 Anchor Events
+
+```cpp
+std::vector<String> logs;
+solana.getTransactionLogs(signature, logs);          // or the logs from an onLogs callback
+
+std::vector<AnchorEvent> events;
+Infratic::parseAnchorEvents(logs, events, PROGRAM_ID);
+for (const AnchorEvent &ev : events) {
+    if (ev.is("RequestFulfilled")) {
+        BorshReader r = ev.reader();                 // fields in Rust struct order
+        uint64_t requestId = r.u64();
+        String node = r.pubkey();
+        String data = r.str();
+    }
+}
+
+// instruction arguments
+BorshWriter args;
+args.u64(42).str("hello").pubkey(SOME_PUBKEY);
+std::vector<uint8_t> ixData = solana.calculateDiscriminator("my_instruction");
+ixData.insert(ixData.end(), args.data.begin(), args.data.end());
+```
 
 ---
 
