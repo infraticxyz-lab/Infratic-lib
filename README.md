@@ -45,6 +45,7 @@
 - ✅ Generic `rpcCall()` for any JSON-RPC method
 - ✅ `getAccountData`, `getProgramAccounts` (with `dataSize` / `memcmp` filters), `getSignaturesForAddress`
 - ✅ `getMinimumBalanceForRentExemption`
+- ✅ Verified TLS: server certificates are checked against built-in root CAs of the common RPC providers
 
 ---
 
@@ -201,6 +202,19 @@ sol.sendSignedData(device, payer, data, sig);     // ed25519 verify ix + memo wi
 ```
 
 For your own program, add `Infratic::ed25519SignIx(device, data)` before your instruction and read it from the instructions sysvar (`INFRATIC_SYSVAR_INSTRUCTIONS_ID`). `Infratic::verifySignature()` checks a signature locally.
+
+---
+
+## 🔐 TLS Verification
+
+HTTPS and WSS connections verify the server certificate. The library ships the root CAs used by api.*.solana.com, Helius, QuickNode, Alchemy, Ankr, dRPC, PublicNode and Shyft, so nothing needs to be configured for these.
+
+```cpp
+sol.setRootCA(MY_PROVIDER_ROOT_PEM);   // other provider: one or more PEM certificates
+sol.setTlsInsecure();                  // local tests only, skips verification
+```
+
+`http://` URLs (e.g. a local `solana-test-validator`) are used without TLS.
 
 ---
 

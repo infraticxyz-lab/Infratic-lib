@@ -271,41 +271,20 @@ String Infratic::getLatestBlockhash()
     {
         _logInfo.printf("🌐 Fetching blockhash (attempt %d/%d)...\n", attempt, maxRetries);
 
-        WiFiClientSecure client;
-        client.setInsecure();
-        HTTPClient http;
-
-        if (!http.begin(client, _rpcUrl))
+        String response;
+        if (rpcCall("getLatestBlockhash", "[]", response))
         {
-            _logErr.println("❌ HTTP begin failed");
-            delay(retryDelayMs);
-            continue;
-        }
-
-        http.addHeader("Content-Type", "application/json");
-        String body = R"({"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[]})";
-
-        int code = http.POST(body);
-        if (code == 200)
-        {
-            String response = http.getString();
-            http.end();
-
             DynamicJsonDocument doc(2048);
-            if (deserializeJson(doc, response))
+            if (!deserializeJson(doc, response))
             {
-                delay(retryDelayMs);
-                continue;
-            }
-
-            String blockhash = doc["result"]["value"]["blockhash"].as<String>();
-            if (!blockhash.isEmpty())
-            {
-                _logInfo.println("✅ Blockhash: " + blockhash);
-                return blockhash;
+                String blockhash = doc["result"]["value"]["blockhash"].as<String>();
+                if (!blockhash.isEmpty() && blockhash != "null")
+                {
+                    _logInfo.println("✅ Blockhash: " + blockhash);
+                    return blockhash;
+                }
             }
         }
-        http.end();
         delay(retryDelayMs);
     }
 
@@ -315,31 +294,14 @@ String Infratic::getLatestBlockhash()
 
 bool Infratic::getBlockHeight(uint64_t &outBlockHeight)
 {
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-
-    if (!http.begin(client, _rpcUrl))
+    String response;
+    if (!rpcCall("getBlockHeight", "[]", response))
     {
-        _logErr.println("❌ getBlockHeight: HTTP begin failed");
         return false;
     }
-
-    http.addHeader("Content-Type", "application/json");
-    String body = R"({"jsonrpc":"2.0","id":1,"method":"getBlockHeight","params":[]})";
-
-    int code = http.POST(body);
-    if (code != 200)
-    {
-        http.end();
-        return false;
-    }
-
-    String response = http.getString();
-    http.end();
 
     DynamicJsonDocument doc(1024);
-    if (deserializeJson(doc, response))
+    if (deserializeJson(doc, response) || doc["result"].isNull())
     {
         return false;
     }
@@ -350,28 +312,11 @@ bool Infratic::getBlockHeight(uint64_t &outBlockHeight)
 
 bool Infratic::getEpochInfo(EpochInfo &outEpochInfo)
 {
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-
-    if (!http.begin(client, _rpcUrl))
+    String response;
+    if (!rpcCall("getEpochInfo", "[]", response))
     {
-        _logErr.println("❌ getEpochInfo: HTTP begin failed");
         return false;
     }
-
-    http.addHeader("Content-Type", "application/json");
-    String body = R"({"jsonrpc":"2.0","id":1,"method":"getEpochInfo","params":[]})";
-
-    int code = http.POST(body);
-    if (code != 200)
-    {
-        http.end();
-        return false;
-    }
-
-    String response = http.getString();
-    http.end();
 
     DynamicJsonDocument doc(2048);
     if (deserializeJson(doc, response))
@@ -380,6 +325,10 @@ bool Infratic::getEpochInfo(EpochInfo &outEpochInfo)
     }
 
     JsonObject result = doc["result"].as<JsonObject>();
+    if (result.isNull())
+    {
+        return false;
+    }
     outEpochInfo.absoluteSlot = result["absoluteSlot"].as<uint64_t>();
     outEpochInfo.blockHeight = result["blockHeight"].as<uint64_t>();
     outEpochInfo.epoch = result["epoch"].as<uint64_t>();
@@ -395,44 +344,19 @@ bool Infratic::getEpochInfo(EpochInfo &outEpochInfo)
 
 bool Infratic::getSolBalance(const String &walletPubkeyBase58, uint64_t &outLamports)
 {
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-
-    if (!http.begin(client, _rpcUrl))
+    String response;
+    if (!rpcCall("getBalance", "[\"" + walletPubkeyBase58 + "\"]", response))
     {
-        _logErr.println("❌ getSolBalance: HTTP begin failed");
         return false;
     }
-
-    String body = String() + R"({"jsonrpc":"2.0","id":1,"method":"getBalance","params":[")" +
-                  walletPubkeyBase58 + R"("]})";
-
-    http.addHeader("Content-Type", "application/json");
-    int code = http.POST(body);
-
-    if (code != 200)
-    {
-        http.end();
-        return false;
-    }
-
-    String response = http.getString();
-    http.end();
 
     DynamicJsonDocument doc(2048);
-    if (deserializeJson(doc, response))
+    if (deserializeJson(doc, response) || doc["result"]["value"].isNull())
     {
         return false;
     }
 
-    if (doc["error"])
-    {
-        _logErr.println("❌ RPC Error: " + doc["error"]["message"].as<String>());
-        return false;
-    }
-
-    outLamports = doc["result"]["value"];
+    outLamports = doc["result"]["value"].as<uint64_t>();
     return true;
 }
 
@@ -447,37 +371,14 @@ bool Infratic::getSplTokenBalance(const String &walletPubkeyBase58, const String
         return true;
     }
 
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-
-    if (!http.begin(client, _rpcUrl))
+    String response;
+    if (!rpcCall("getTokenAccountBalance", "[\"" + ataAddress + "\"]", response))
     {
         return false;
     }
-
-    String body = String() + R"({"jsonrpc":"2.0","id":1,"method":"getTokenAccountBalance","params":[")" +
-                  ataAddress + R"("]})";
-
-    http.addHeader("Content-Type", "application/json");
-    int code = http.POST(body);
-
-    if (code != 200)
-    {
-        http.end();
-        return false;
-    }
-
-    String response = http.getString();
-    http.end();
 
     DynamicJsonDocument doc(2048);
     if (deserializeJson(doc, response))
-    {
-        return false;
-    }
-
-    if (doc["error"])
     {
         return false;
     }
@@ -494,37 +395,14 @@ bool Infratic::getSplTokenBalance(const String &walletPubkeyBase58, const String
 
 bool Infratic::getTokenDecimals(const String &mintPubkeyBase58, uint8_t &outDecimals)
 {
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-
-    if (!http.begin(client, _rpcUrl))
+    String response;
+    if (!rpcCall("getTokenSupply", "[\"" + mintPubkeyBase58 + "\"]", response))
     {
         return false;
     }
-
-    String body = String() + R"({"jsonrpc":"2.0","id":1,"method":"getTokenSupply","params":[")" +
-                  mintPubkeyBase58 + R"("]})";
-
-    http.addHeader("Content-Type", "application/json");
-    int code = http.POST(body);
-
-    if (code != 200)
-    {
-        http.end();
-        return false;
-    }
-
-    String response = http.getString();
-    http.end();
 
     DynamicJsonDocument doc(4096);
     if (deserializeJson(doc, response))
-    {
-        return false;
-    }
-
-    if (doc["error"])
     {
         return false;
     }
@@ -547,38 +425,14 @@ bool Infratic::findAssociatedTokenAccount(const String &ownerPubkeyBase58,
                                           const String &mintPubkeyBase58,
                                           String &outATA)
 {
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-
-    if (!http.begin(client, _rpcUrl))
+    String response;
+    if (!rpcCall("getTokenAccountsByOwner", "[\"" + ownerPubkeyBase58 + R"(",{"mint":")" + mintPubkeyBase58 + R"("},{"encoding":"jsonParsed"}])", response))
     {
         return false;
     }
-
-    String body = String() + R"({"jsonrpc":"2.0","id":1,"method":"getTokenAccountsByOwner","params":[")" +
-                  ownerPubkeyBase58 + R"(",{"mint":")" + mintPubkeyBase58 +
-                  R"("},{"encoding":"jsonParsed"}]})";
-
-    http.addHeader("Content-Type", "application/json");
-    int code = http.POST(body);
-
-    if (code != 200)
-    {
-        http.end();
-        return false;
-    }
-
-    String response = http.getString();
-    http.end();
 
     DynamicJsonDocument doc(4096);
     if (deserializeJson(doc, response))
-    {
-        return false;
-    }
-
-    if (doc["error"])
     {
         return false;
     }
@@ -700,33 +554,17 @@ bool Infratic::sendProgramDataTransaction(const String &privateKeyBase58,
 
 bool Infratic::sendRawTransaction(const String &txBase64, String &outSignature, bool skipPreflight)
 {
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-
-    if (!http.begin(client, _rpcUrl))
-    {
-        _logErr.println("❌ HTTP begin failed");
-        return false;
-    }
-
-    http.addHeader("Content-Type", "application/json");
-
     String body = String() + R"({"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":[")" +
                   txBase64 + R"(",{"encoding":"base64","skipPreflight":)" + (skipPreflight ? "true" : "false") +
                   R"(,"preflightCommitment":"confirmed"}]})";
 
-    int code = http.POST(body);
-    if (code != 200)
+    String response;
+    int code = 0;
+    if (!httpPost(body, response, code))
     {
-        _logErr.printf("❌ HTTP code: %d\n", code);
-        _logInfo.println(http.getString());
-        http.end();
+        _logErr.printf("❌ sendTransaction: HTTP code %d\n", code);
         return false;
     }
-
-    String response = http.getString();
-    http.end();
 
     DynamicJsonDocument doc(infratic_detail::jsonCapacity(response));
     if (deserializeJson(doc, response))
@@ -878,48 +716,6 @@ AccountFilter AccountFilter::memcmp(size_t offset, const std::vector<uint8_t> &b
     f.offset = offset;
     f.bytes = bytes;
     return f;
-}
-
-bool Infratic::rpcCall(const String &method, const String &paramsJson, String &outResponse)
-{
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-
-    if (!http.begin(client, _rpcUrl))
-    {
-        _logErr.println("❌ " + method + ": HTTP begin failed");
-        return false;
-    }
-
-    http.addHeader("Content-Type", "application/json");
-    String body = String(R"({"jsonrpc":"2.0","id":1,"method":")") + method + R"(","params":)" + paramsJson + "}";
-
-    int code = http.POST(body);
-    if (code != 200)
-    {
-        _logErr.printf("❌ %s: HTTP code %d\n", method.c_str(), code);
-        http.end();
-        return false;
-    }
-
-    outResponse = http.getString();
-    http.end();
-
-    StaticJsonDocument<32> filter;
-    filter["error"] = true;
-    DynamicJsonDocument err(512);
-    if (deserializeJson(err, outResponse, DeserializationOption::Filter(filter)))
-    {
-        _logErr.println("❌ " + method + ": JSON parse error");
-        return false;
-    }
-    if (!err["error"].isNull())
-    {
-        _logErr.println("❌ " + method + " RPC error: " + err["error"]["message"].as<String>());
-        return false;
-    }
-    return true;
 }
 
 bool Infratic::getAccountData(const String &accountBase58, std::vector<uint8_t> &outData,

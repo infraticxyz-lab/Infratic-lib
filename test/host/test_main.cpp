@@ -13,6 +13,8 @@
 #include <WiFiClient.h>
 #include <Preferences.h>
 #include <deque>
+#include <mbedtls/x509_crt.h>
+#include <WiFiClientSecure.h>
 #include <algorithm>
 
 #ifndef INFRATIC_VERSION
@@ -1009,6 +1011,48 @@ static void testDeviceSignatures(Infratic &sol, JsonObject c)
     }
 }
 
+static void testTls()
+{
+    g_group = "tls";
+    int slotCalls = 0;
+    g_httpHandler = [&](const std::string &, const std::string &body) -> MockHttpResponse {
+        if (body.find("getBlockHeight") != std::string::npos) { slotCalls++; return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":42}"}; }
+        return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"};
+    };
+    Infratic sol("https://mock.rpc");
+    uint64_t slot = 0;
+    g_tlsLastCA = nullptr; g_tlsInsecureCount = 0;
+    CHECK(sol.getBlockHeight(slot) && slot == 42, "rpc works with verification");
+    CHECK(g_tlsLastCA != nullptr && g_tlsInsecureCount == 0, "default: CA set, not insecure");
+    if (g_tlsLastCA)
+    {
+        mbedtls_x509_crt chain; mbedtls_x509_crt_init(&chain);
+        int rc = mbedtls_x509_crt_parse(&chain, (const unsigned char *)g_tlsLastCA, strlen(g_tlsLastCA) + 1);
+        int n = 0; bool allCa = true;
+        for (mbedtls_x509_crt *c = &chain; c && c->raw.len; c = c->next) { n++;
+#if defined(MBEDTLS_VERSION_MAJOR) && MBEDTLS_VERSION_MAJOR >= 3
+            allCa &= c->MBEDTLS_PRIVATE(ca_istrue) != 0;
+#else
+            allCa &= c->ca_istrue != 0;
+#endif
+        }
+        CHECK(rc == 0 && n == 8 && allCa, "default bundle parses: 8 root CAs (rc " + std::to_string(rc) + ", n " + std::to_string(n) + ")");
+        mbedtls_x509_crt_free(&chain);
+    }
+    static const char myCa[] = "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n";
+    sol.setRootCA(myCa);
+    sol.getBlockHeight(slot);
+    CHECK(g_tlsLastCA == myCa, "custom root CA used");
+    sol.setTlsInsecure();
+    sol.getBlockHeight(slot);
+    CHECK(g_tlsInsecureCount == 1, "insecure only when asked");
+    sol.setTlsInsecure(false); sol.setRootCA(nullptr);
+    g_tlsLastCA = nullptr; g_tlsInsecureCount = 0;
+    Infratic local("http://127.0.0.1:8899");
+    CHECK(local.getBlockHeight(slot) && g_tlsLastCA == nullptr && g_tlsInsecureCount == 0, "plain http for local validator");
+    CHECK(slotCalls == 4, "all calls reached the server");
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -1085,6 +1129,7 @@ int main(int argc, char **argv) {
     testVersioned(sol, doc["v0"]);
     testKeys(doc["bip39"]);
     testDeviceSignatures(sol, doc["ed25519"]);
+    testTls();
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");

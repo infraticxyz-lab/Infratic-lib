@@ -234,7 +234,7 @@ bool Infratic::wsConnect()
     if (s.secure)
     {
         WiFiClientSecure *c = new WiFiClientSecure();
-        c->setInsecure();
+        configureTls(*c);
         s.client.reset(c);
     }
     else

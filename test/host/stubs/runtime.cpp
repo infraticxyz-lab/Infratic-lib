@@ -9,6 +9,8 @@ HardwareSerial Serial;
 WiFiClass WiFi;
 bool g_serialQuiet = true;
 MockSocket *g_mockSocket = nullptr;
+int g_tlsInsecureCount = 0;
+const char *g_tlsLastCA = nullptr;
 std::map<std::string, std::map<std::string, std::vector<uint8_t>>> g_nvs;
 std::function<MockHttpResponse(const std::string &, const std::string &)> g_httpHandler;
 

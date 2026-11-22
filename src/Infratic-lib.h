@@ -785,6 +785,19 @@ public:
     bool rpcCall(const String &method, const String &paramsJson, String &outResponse);
 
     /**
+     * @brief Root CA(s) used to verify the RPC / WebSocket server (PEM, several can be concatenated).
+     *        By default a bundle for the common Solana RPC providers is used. The string must stay
+     *        valid while the client is used (a literal or a global). nullptr restores the default.
+     */
+    void setRootCA(const char *pem);
+
+    /**
+     * @brief Skips certificate verification. Only for local tests, anyone on the network can
+     *        then read and change RPC traffic.
+     */
+    void setTlsInsecure(bool insecure = true);
+
+    /**
      * @brief Reads raw account data (base64 decoded)
      * @param accountBase58 Account address
      * @param outData Account data bytes
@@ -1260,6 +1273,11 @@ public:
 
 private:
     String _rpcUrl;
+    const char *_rootCA = nullptr;
+    bool _tlsInsecure = false;
+    void configureTls(WiFiClientSecure &client);
+    // POST to the RPC endpoint, true on HTTP 200
+    bool httpPost(const String &body, String &outResponse, int &outCode);
     uint64_t _priorityFeeMicroLamports = 0;
     std::shared_ptr<InfraticWsState> _ws;
     InfraticWsState &ws();
