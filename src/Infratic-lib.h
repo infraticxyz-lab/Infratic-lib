@@ -26,6 +26,8 @@
 #define INFRATIC_SYSVAR_RECENT_BLOCKHASHES_ID "SysvarRecentB1ockHashes11111111111111111111"
 #define INFRATIC_SYSVAR_RENT_ID "SysvarRent111111111111111111111111111111111"
 #define INFRATIC_ADDRESS_LOOKUP_TABLE_PROGRAM_ID "AddressLookupTab1e1111111111111111111111111"
+#define INFRATIC_ED25519_PROGRAM_ID "Ed25519SigVerify111111111111111111111111111"
+#define INFRATIC_SYSVAR_INSTRUCTIONS_ID "Sysvar1nstructions1111111111111111111111111"
 
 /** Log levels for Infratic::setLogLevel() */
 enum InfraticLogLevel : uint8_t
@@ -645,6 +647,33 @@ public:
 
     /** @brief Call often from loop(): reads messages, runs callbacks, keeps the socket alive */
     void wsLoop();
+
+    // ========================================================================
+    // DEVICE SIGNATURES (Ed25519 program)
+    // ========================================================================
+
+    /**
+     * @brief Instruction for the native Ed25519 program: the runtime checks that
+     * `signature` is valid for `message` and `signer`, otherwise the whole tx fails.
+     * Your program can read it from the Instructions sysvar to trust device data.
+     */
+    static Instruction ed25519VerifyIx(const Pubkey &signer, const uint8_t signature[64],
+                                       const std::vector<uint8_t> &message);
+
+    /** @brief Signs `message` with the device key and returns the Ed25519 program instruction */
+    static Instruction ed25519SignIx(const Keypair &device, const std::vector<uint8_t> &message);
+
+    /** @brief Off-chain check of an ed25519 signature */
+    static bool verifySignature(const Pubkey &signer, const uint8_t signature[64], const std::vector<uint8_t> &message);
+
+    /**
+     * @brief Sends device-signed data in one transaction: Ed25519 check + memo with the data.
+     * The memo makes the data visible in explorers; the Ed25519 instruction proves who signed it.
+     * @param device Key that signs the data (can be different from the fee payer)
+     * @param payer Fee payer
+     */
+    bool sendSignedData(const Keypair &device, const Keypair &payer, const std::vector<uint8_t> &data,
+                        String &outSignature);
 
     // ========================================================================
     // ANCHOR EVENTS

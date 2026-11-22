@@ -2,7 +2,7 @@
 // Run: npm install && node gen.mjs > ../vectors.json
 import {
   Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, ComputeBudgetProgram,
-  TransactionMessage, VersionedTransaction, AddressLookupTableAccount, AddressLookupTableProgram,
+  TransactionMessage, VersionedTransaction, AddressLookupTableAccount, AddressLookupTableProgram, Ed25519Program,
 } from '@solana/web3.js';
 import bs58 from 'bs58';
 import * as bip39 from 'bip39';
@@ -336,6 +336,29 @@ for (const prog of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
     cases.push({ entropy: hex(ent), mnemonic, passphrase, seed: seed.toString('hex'), accounts });
   });
   out.bip39 = cases;
+}
+
+// ---- device signatures (Ed25519 program) ---------------------------------------------------
+{
+  const MEMO = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
+  const device = kp(); const payer = kp();
+  const msgs = [Buffer.from('{"t":23.4,"h":51,"n":1}'), Buffer.from(bytes(300)), Buffer.alloc(0)];
+  const ixs = msgs.map((m) => {
+    const ix = Ed25519Program.createInstructionWithPrivateKey({ privateKey: device.secretKey, message: m });
+    return { message: hex(m), data: hex(ix.data), program: ix.programId.toBase58(), keys: ix.keys.length };
+  });
+  const bh = blockhash(); const data = msgs[0];
+  const tx = new Transaction({ recentBlockhash: bh, feePayer: payer.publicKey })
+    .add(Ed25519Program.createInstructionWithPrivateKey({ privateKey: device.secretKey, message: data }))
+    .add(new TransactionInstruction({ programId: MEMO, keys: [], data }));
+  tx.sign(payer);
+  const bin = Buffer.from([0, 255, 1, 2]);
+  const tx2 = new Transaction({ recentBlockhash: bh, feePayer: payer.publicKey })
+    .add(Ed25519Program.createInstructionWithPrivateKey({ privateKey: device.secretKey, message: bin }))
+    .add(new TransactionInstruction({ programId: MEMO, keys: [], data: Buffer.from(bin.toString('hex')) }));
+  tx2.sign(payer);
+  out.ed25519 = { device: bs58.encode(device.secretKey), payer: bs58.encode(payer.secretKey), ixs, blockhash: bh,
+    data: hex(data), message: hex(tx.serializeMessage()), binData: hex(bin), binMessage: hex(tx2.serializeMessage()) };
 }
 
 process.stdout.write(JSON.stringify(out));

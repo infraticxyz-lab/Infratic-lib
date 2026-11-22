@@ -969,6 +969,46 @@ static void testKeys(JsonArray cases)
     CHECK(!raw.unlock("pin-abc", got), "tampered blob rejected");
 }
 
+static void testDeviceSignatures(Infratic &sol, JsonObject c)
+{
+    g_group = "ed25519";
+    Keypair device = Keypair::fromBase58(c["device"].as<const char *>()), payer = Keypair::fromBase58(c["payer"].as<const char *>());
+    for (JsonObject v : c["ixs"].as<JsonArray>())
+    {
+        std::vector<uint8_t> m = fromHex(v["message"].as<std::string>());
+        Instruction ix = Infratic::ed25519SignIx(device, m);
+        CHECK(toHex(ix.data) == v["data"].as<std::string>() && ix.accounts.size() == v["keys"].as<size_t>() &&
+              base58Encode(ix.programId.data.data(), 32) == v["program"].as<const char *>(), "ix bytes, message " + std::to_string(m.size()));
+        uint8_t sig[64]; memcpy(sig, ix.data.data() + 48, 64);
+        CHECK(Infratic::verifySignature(device.pubkey(), sig, m), "verify ok");
+        std::vector<uint8_t> m2 = m; m2.push_back(1);
+        CHECK(!Infratic::verifySignature(device.pubkey(), sig, m2) && !Infratic::verifySignature(payer.pubkey(), sig, m), "verify rejects");
+    }
+
+    std::string bh = c["blockhash"].as<std::string>(), sent;
+    g_httpHandler = [&](const std::string &, const std::string &body) -> MockHttpResponse {
+        auto has = [&](const char *x) { return body.find(x) != std::string::npos; };
+        if (has("getLatestBlockhash")) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":{\"blockhash\":\"" + bh + "\",\"lastValidBlockHeight\":1000}}}"};
+        if (has("sendTransaction")) { DynamicJsonDocument d(8192); deserializeJson(d, body); sent = d["params"][0].as<std::string>(); return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"5sig\"}"}; }
+        if (has("getSignatureStatuses")) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":[{\"confirmationStatus\":\"confirmed\",\"err\":null}]}}"};
+        return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"};
+    };
+    for (int variant = 0; variant < 2; variant++)
+    {
+        std::vector<uint8_t> data = fromHex(c[variant ? "binData" : "data"].as<std::string>());
+        String sig;
+        sent.clear();
+        CHECK(sol.sendSignedData(device, payer, data, sig), std::string("sendSignedData ") + (variant ? "binary" : "text"));
+        std::vector<uint8_t> raw(sent.size()); size_t n = 0;
+        mbedtls_base64_decode(raw.data(), raw.size(), &n, (const unsigned char *)sent.data(), sent.size()); raw.resize(n);
+        if (raw.size() <= 65) { CHECK(false, "no tx sent"); continue; }
+        std::vector<uint8_t> msg(raw.begin() + 65, raw.end());
+        DecodedMsg a = decodeMsg(msg), b = decodeMsg(fromHex(c[variant ? "binMessage" : "message"].as<std::string>()));
+        CHECK(a.ok && a.canon == b.canon, std::string("signed data tx ") + (variant ? "binary->hex memo" : "text") + "\n    want " + b.canon + "\n    got  " + a.canon);
+        CHECK(raw[0] == 1 && Ed25519::verify(raw.data() + 1, payer.pubkey().data.data(), msg.data(), msg.size()), "only the payer signs the tx");
+    }
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -1044,6 +1084,7 @@ int main(int argc, char **argv) {
     testAnchorEvents(sol, doc["events"]);
     testVersioned(sol, doc["v0"]);
     testKeys(doc["bip39"]);
+    testDeviceSignatures(sol, doc["ed25519"]);
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");

@@ -27,6 +27,7 @@
 - ✅ BIP39 mnemonics (12/24 words) with Phantom/Solflare compatible derivation
 - ✅ PIN protected key storage on the device (AES-256-GCM in NVS, wipe after wrong PINs)
 - ✅ Ed25519 signing
+- ✅ Device signatures verified on chain (Ed25519 program) for signed sensor data
 - ✅ Base58 encoding/decoding
 - ✅ Message signing with Base58 or raw binary keys
 
@@ -182,6 +183,24 @@ if (store.unlock("4821", wallet)) {          // account 0 -> same address as in 
 ```
 
 The secret is encrypted with AES-256-GCM using a key derived from the PIN (PBKDF2-HMAC-SHA256, 20000 rounds). After 10 wrong PINs the slot is wiped (`setMaxAttempts`). For production devices also enable ESP32 flash encryption so the NVS partition can't be read from a flash dump.
+
+---
+
+## ✍️ Device Signatures
+
+Sign data with a device key and let the Ed25519 program verify it on chain. The device key never pays fees, a separate payer signs the transaction.
+
+```cpp
+Keypair device;                                   // e.g. from KeyStore
+Keypair payer = Keypair::fromBase58(PAYER_KEY);
+
+String json = "{\"t\":23.4,\"h\":51}";
+std::vector<uint8_t> data(json.begin(), json.end());
+String sig;
+sol.sendSignedData(device, payer, data, sig);     // ed25519 verify ix + memo with the data
+```
+
+For your own program, add `Infratic::ed25519SignIx(device, data)` before your instruction and read it from the instructions sysvar (`INFRATIC_SYSVAR_INSTRUCTIONS_ID`). `Infratic::verifySignature()` checks a signature locally.
 
 ---
 
