@@ -37,6 +37,9 @@ namespace infratic_detail
     String toBase64(const uint8_t *data, size_t len);
     bool fromBase64(const char *in, std::vector<uint8_t> &out);
     size_t jsonCapacity(const String &response);
+
+    // Fills a TxError from an RPC "err" value and optional log array
+    void parseTxError(JsonVariantConst err, JsonVariantConst logs, TxError &out);
 }
 
 #define _logErr infratic_detail::logErr

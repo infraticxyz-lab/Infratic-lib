@@ -7,6 +7,7 @@
 #include <sstream>
 #include <map>
 #include "Infratic-lib.h"
+#include "infratic_internal.h"
 #include <mbedtls/base64.h>
 
 #ifndef INFRATIC_VERSION
@@ -441,6 +442,74 @@ static void testNonce(Infratic &sol, JsonObject c)
     CHECK(tx.recent_blockhash == acc["nonce"].as<const char *>(), "nonce used as blockhash");
 }
 
+static void testSendReliability(Infratic &sol)
+{
+    g_group = "send";
+    const char *anchorLog = "Program log: AnchorError thrown in programs/praas-core/src/lib.rs:199. Error Code: InsufficientRequestCredits. Error Number: 6000. Error Message: Not enough request credits.";
+    std::string mode;
+    int sends = 0, statusCalls = 0, preflightSkipped = 0;
+    uint64_t height = 10;
+    g_httpHandler = [&](const std::string &, const std::string &body) -> MockHttpResponse {
+        auto has = [&](const char *x) { return body.find(x) != std::string::npos; };
+        if (has("simulateTransaction"))
+            return {200, std::string("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":{\"err\":{\"InstructionError\":[1,{\"Custom\":6000}]},\"logs\":[\"Program x invoke [1]\",\"") + anchorLog + "\"],\"unitsConsumed\":1234}}}"};
+        if (has("getLatestBlockhash"))
+            return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"context\":{\"slot\":5},\"value\":{\"blockhash\":\"4uQeVj5tqViQh7yWWGStvkEG1Zmhx6uasJtWCJziofM\",\"lastValidBlockHeight\":150}}}"};
+        if (has("getBlockHeight")) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":" + std::to_string(height) + "}"};
+        if (has("sendTransaction"))
+        {
+            sends++;
+            if (has("\"skipPreflight\":true")) preflightSkipped++;
+            if (mode == "preflight")
+                return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Transaction simulation failed: Error processing Instruction 0: invalid account data for instruction\",\"data\":{\"err\":{\"InstructionError\":[0,\"InvalidAccountData\"]},\"logs\":[\"Program log: hi\"]}}}"};
+            return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"5sig\"}"};
+        }
+        if (has("getSignatureStatuses"))
+        {
+            statusCalls++;
+            if (mode == "fails") return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":[{\"err\":{\"InsufficientFundsForRent\":{\"account_index\":0}},\"confirmationStatus\":\"processed\"}]}}"};
+            if (mode == "slow" && statusCalls > 8) return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":[{\"err\":null,\"confirmationStatus\":\"confirmed\"}]}}"};
+            return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":[null]}}"};
+        }
+        return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"};
+    };
+
+    SimulationResult sim;
+    CHECK(sol.simulateTransaction("AAAA", sim) && !sim.success && sim.unitsConsumed == 1234 && sim.logs.size() == 2, "simulate result");
+    CHECK(sim.error.instructionIndex == 1 && sim.error.customCode == 6000 && sim.error.name == "InsufficientRequestCredits" &&
+          sim.error.message == "Not enough request credits", "anchor error decoded: " + sim.error.name.s + " / " + sim.error.message.s);
+    CHECK(sol.lastTxError().customCode == 6000, "lastTxError after simulate");
+
+    String bh; uint64_t lvbh = 0;
+    CHECK(sol.getLatestBlockhash(bh, lvbh) && bh == "4uQeVj5tqViQh7yWWGStvkEG1Zmhx6uasJtWCJziofM" && lvbh == 150, "blockhash + lastValidBlockHeight");
+
+    String sig;
+    mode = "preflight"; sends = 0;
+    CHECK(!sol.sendAndConfirm("AAAA", 150, sig) && sends == 1, "preflight failure stops");
+    CHECK(sol.lastTxError().name == "InvalidAccountData" && sol.lastTxError().instructionIndex == 0 && sol.lastTxError().logs.size() == 1, "preflight error decoded: " + sol.lastTxError().name.s);
+
+    mode = "slow"; sends = 0; statusCalls = 0; preflightSkipped = 0; height = 10;
+    CHECK(sol.sendAndConfirm("AAAA", 150, sig) && sig == "5sig", "confirmed after re-sends");
+    CHECK(sends >= 2 && preflightSkipped == sends - 1, "re-broadcast " + std::to_string(sends) + " sends, " + std::to_string(preflightSkipped) + " skipPreflight");
+
+    mode = "pending"; sends = 0; statusCalls = 0; height = 151;
+    CHECK(!sol.sendAndConfirm("AAAA", 150, sig) && sol.lastTxError().name == "BlockhashExpired", "blockhash expiry detected");
+
+    mode = "pending"; height = 10;
+    CHECK(!sol.sendAndConfirm("AAAA", 0, sig, 5000) && sol.lastTxError().name == "Timeout", "timeout reported");
+
+    mode = "fails"; statusCalls = 0;
+    CHECK(!sol.confirmTransaction("5sig", 10000) && statusCalls == 1, "confirm returns at once on failure");
+    CHECK(sol.lastTxError().name == "InsufficientFundsForRent", "status error decoded: " + sol.lastTxError().name.s);
+
+    // plain string error
+    {
+        StaticJsonDocument<64> d; deserializeJson(d, "\"BlockhashNotFound\"");
+        TxError e; infratic_detail::parseTxError(d.as<JsonVariantConst>(), JsonVariantConst(), e);
+        CHECK(e.hasError && e.name == "BlockhashNotFound", "string error");
+    }
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -511,6 +580,7 @@ int main(int argc, char **argv) {
     testSpl(sol, doc["spl"]);
     testComputeBudget(sol, doc["computeBudget"]);
     testNonce(sol, doc["nonce"]);
+    testSendReliability(sol);
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");

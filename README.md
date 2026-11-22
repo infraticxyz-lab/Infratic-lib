@@ -18,7 +18,8 @@
 - ✅ Send SPL tokens (Token Program and Token-2022), create ATAs automatically
 - ✅ Get SOL and SPL token balances, token decimals
 - ✅ Derive / find Associated Token Accounts
-- ✅ Transaction confirmation with retry logic
+- ✅ Reliable sending: re-broadcast until confirmed, blockhash expiry detection, simulation
+- ✅ Readable errors: instruction errors and Anchor error codes via `lastTxError()`
 - ✅ Priority fees (Compute Budget) on every transaction the library sends
 - ✅ Durable nonce: sign now, send later (no 60 s blockhash limit)
 
@@ -155,6 +156,24 @@ solana.getAccountData(accountAddress, raw);
 ```
 
 Use filters on ESP32: an unfiltered `getProgramAccounts` response can easily be larger than the available RAM.
+
+---
+
+## 🛡️ Reliable Sending & Errors
+
+`signAndSend` (and everything built on it) re-sends the transaction every ~2 s until it is confirmed, fails, or its blockhash expires.
+
+```cpp
+if (!solana.signAndSend(tx, {myKeypair}, sig)) {
+    const TxError &e = solana.lastTxError();
+    // e.name: "InsufficientRequestCredits", "BlockhashExpired", "InvalidAccountData", ...
+    // e.customCode: Anchor error number (6000+), e.instructionIndex, e.message, e.logs
+}
+
+SimulationResult sim;                       // dry run before spending fees
+solana.simulateTransaction(tx.serializeBase64(), sim);
+Serial.printf("units: %llu ok: %d\n", sim.unitsConsumed, sim.success);
+```
 
 ---
 

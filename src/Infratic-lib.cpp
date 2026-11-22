@@ -698,7 +698,7 @@ bool Infratic::sendProgramDataTransaction(const String &privateKeyBase58,
     return true;
 }
 
-bool Infratic::sendRawTransaction(const String &txBase64, String &outSignature)
+bool Infratic::sendRawTransaction(const String &txBase64, String &outSignature, bool skipPreflight)
 {
     WiFiClientSecure client;
     client.setInsecure();
@@ -713,7 +713,8 @@ bool Infratic::sendRawTransaction(const String &txBase64, String &outSignature)
     http.addHeader("Content-Type", "application/json");
 
     String body = String() + R"({"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":[")" +
-                  txBase64 + R"(",{"encoding":"base64","skipPreflight":false,"preflightCommitment":"confirmed"}]})";
+                  txBase64 + R"(",{"encoding":"base64","skipPreflight":)" + (skipPreflight ? "true" : "false") +
+                  R"(,"preflightCommitment":"confirmed"}]})";
 
     int code = http.POST(body);
     if (code != 200)
@@ -727,7 +728,7 @@ bool Infratic::sendRawTransaction(const String &txBase64, String &outSignature)
     String response = http.getString();
     http.end();
 
-    DynamicJsonDocument doc(2048);
+    DynamicJsonDocument doc(infratic_detail::jsonCapacity(response));
     if (deserializeJson(doc, response))
     {
         _logErr.println("❌ JSON parse error");
@@ -736,12 +737,61 @@ bool Infratic::sendRawTransaction(const String &txBase64, String &outSignature)
 
     if (doc["error"])
     {
+        TxError err;
+        if (!doc["error"]["data"]["err"].isNull())
+        {
+            infratic_detail::parseTxError(doc["error"]["data"]["err"], doc["error"]["data"]["logs"], err);
+        }
+        else
+        {
+            err.hasError = true;
+            err.name = "RpcError";
+        }
+        if (err.message.isEmpty())
+        {
+            err.message = doc["error"]["message"].as<String>();
+        }
+        _lastTxError = err;
         _logErr.println("❌ RPC Error: " + doc["error"]["message"].as<String>());
+        if (err.customCode >= 0)
+        {
+            _logErr.printf("   Program error %lld %s: %s\n", (long long)err.customCode, err.name.c_str(), err.message.c_str());
+        }
         return false;
     }
 
     outSignature = doc["result"].as<String>();
     return true;
+}
+
+int Infratic::checkSignatureStatus(const String &signature)
+{
+    String response;
+    if (!rpcCall("getSignatureStatuses", "[[\"" + signature + "\"],{\"searchTransactionHistory\":true}]", response))
+    {
+        return 0;
+    }
+
+    DynamicJsonDocument doc(2048);
+    if (deserializeJson(doc, response))
+    {
+        return 0;
+    }
+
+    JsonVariant status = doc["result"]["value"][0];
+    if (status.isNull())
+    {
+        return 0;
+    }
+    if (!status["err"].isNull())
+    {
+        infratic_detail::parseTxError(status["err"], JsonVariantConst(), _lastTxError);
+        _logErr.println("❌ Transaction failed: " + _lastTxError.raw);
+        return -1;
+    }
+
+    String conf = status["confirmationStatus"] | "";
+    return (conf == "confirmed" || conf == "finalized") ? 1 : 0;
 }
 
 bool Infratic::confirmTransaction(const String &signature, uint32_t maxWaitMs)
@@ -751,53 +801,15 @@ bool Infratic::confirmTransaction(const String &signature, uint32_t maxWaitMs)
 
     while (waited <= maxWaitMs)
     {
-        WiFiClientSecure client;
-        client.setInsecure();
-        HTTPClient http;
-
-        if (!http.begin(client, _rpcUrl))
+        int status = checkSignatureStatus(signature);
+        if (status == 1)
         {
-            delay(pollIntervalMs);
-            waited += pollIntervalMs;
-            continue;
+            _logInfo.println("✅ Transaction confirmed");
+            return true;
         }
-
-        String body = String() + R"({"jsonrpc":"2.0","id":1,"method":"getSignatureStatuses","params":[[")" +
-                      signature + R"("],{"searchTransactionHistory":true}]})";
-
-        http.addHeader("Content-Type", "application/json");
-        int code = http.POST(body);
-
-        if (code != 200)
+        if (status < 0)
         {
-            http.end();
-            delay(pollIntervalMs);
-            waited += pollIntervalMs;
-            continue;
-        }
-
-        String response = http.getString();
-        http.end();
-
-        DynamicJsonDocument doc(2048);
-        if (deserializeJson(doc, response))
-        {
-            delay(pollIntervalMs);
-            waited += pollIntervalMs;
-            continue;
-        }
-
-        JsonVariant status = doc["result"]["value"][0];
-        if (!status.isNull())
-        {
-            bool errNull = status["err"].isNull();
-            String confStatus = status["confirmationStatus"] | "";
-
-            if ((confStatus == "confirmed" || confStatus == "finalized") && errNull)
-            {
-                _logInfo.println("✅ Transaction confirmed");
-                return true;
-            }
+            return false;
         }
 
         delay(pollIntervalMs);

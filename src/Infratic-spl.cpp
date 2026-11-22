@@ -25,13 +25,11 @@ bool Infratic::signAndSend(Transaction &tx, const std::vector<Keypair> &signers,
     {
         tx.fee_payer = signers[0].pubkey();
     }
-    if (tx.recent_blockhash.isEmpty())
+
+    uint64_t lastValidBlockHeight = 0; // unknown for durable nonce transactions
+    if (tx.recent_blockhash.isEmpty() && !getLatestBlockhash(tx.recent_blockhash, lastValidBlockHeight))
     {
-        tx.recent_blockhash = getLatestBlockhash();
-        if (tx.recent_blockhash.isEmpty())
-        {
-            return false;
-        }
+        return false;
     }
 
     applyPriorityFee(tx);
@@ -41,13 +39,17 @@ bool Infratic::signAndSend(Transaction &tx, const std::vector<Keypair> &signers,
     }
 
     String txBase64 = tx.serializeBase64();
-    if (txBase64.isEmpty() || !sendRawTransaction(txBase64, outSignature))
+    if (txBase64.isEmpty())
     {
         return false;
     }
 
-    _logInfo.println("📤 Sent: " + outSignature);
-    return confirmWaitMs == 0 || confirmTransaction(outSignature, confirmWaitMs);
+    if (confirmWaitMs == 0)
+    {
+        _lastTxError = TxError();
+        return sendRawTransaction(txBase64, outSignature);
+    }
+    return sendAndConfirm(txBase64, lastValidBlockHeight, outSignature, confirmWaitMs);
 }
 
 bool Infratic::getAssociatedTokenAddress(const String &ownerBase58, const String &mintBase58, String &outAta,

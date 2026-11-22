@@ -234,6 +234,30 @@ struct NonceInfo
 };
 
 // ============================================================================
+// TRANSACTION ERRORS
+// ============================================================================
+
+/** Details of the last failed transaction (see Infratic::lastTxError) */
+struct TxError
+{
+    bool hasError = false;
+    int instructionIndex = -1; // failing instruction, -1 if not instruction specific
+    int64_t customCode = -1;   // program error code (e.g. Anchor 6000+), -1 if none
+    String name;               // e.g. "InsufficientFunds", Anchor error name, "BlockhashExpired"
+    String message;            // Anchor error message or RPC message
+    String raw;                // raw error JSON
+    std::vector<String> logs;  // program logs when available
+};
+
+struct SimulationResult
+{
+    bool success = false;
+    uint64_t unitsConsumed = 0;
+    std::vector<String> logs;
+    TxError error;
+};
+
+// ============================================================================
 // RPC RESULT STRUCTURES
 // ============================================================================
 
@@ -285,6 +309,12 @@ public:
      * @return Latest blockhash in Base58 format, or empty string on failure
      */
     String getLatestBlockhash();
+
+    /**
+     * @brief Latest blockhash plus the last block height it is valid for
+     * @return true if successful
+     */
+    bool getLatestBlockhash(String &outBlockhash, uint64_t &outLastValidBlockHeight);
 
     /**
      * @brief Gets the current block height
@@ -376,7 +406,7 @@ public:
      * @param outSignature Output parameter for transaction signature
      * @return true if successful
      */
-    bool sendRawTransaction(const String &txBase64, String &outSignature);
+    bool sendRawTransaction(const String &txBase64, String &outSignature, bool skipPreflight = false);
 
     /**
      * @brief Confirms transaction on blockchain
@@ -385,6 +415,20 @@ public:
      * @return true if confirmed
      */
     bool confirmTransaction(const String &signature, uint32_t maxWaitMs = 5000);
+
+    /**
+     * @brief Sends and keeps re-sending until confirmed, failed or the blockhash expired
+     * @param lastValidBlockHeight From getLatestBlockhash (0 = unknown, e.g. durable nonce)
+     * @param timeoutMs Overall timeout
+     */
+    bool sendAndConfirm(const String &txBase64, uint64_t lastValidBlockHeight, String &outSignature,
+                        uint32_t timeoutMs = 30000);
+
+    /** @brief Runs the transaction without sending it (logs, compute units, error) */
+    bool simulateTransaction(const String &txBase64, SimulationResult &outResult, bool sigVerify = false);
+
+    /** @brief Error of the last failed send / confirm / simulate */
+    const TxError &lastTxError() const { return _lastTxError; }
 
     /**
      * @brief Fills fee payer / blockhash if empty, signs, sends and waits for confirmation
@@ -970,6 +1014,10 @@ public:
 private:
     String _rpcUrl;
     uint64_t _priorityFeeMicroLamports = 0;
+    TxError _lastTxError;
+
+    // 1 = confirmed, -1 = failed (lastTxError set), 0 = pending / unknown
+    int checkSignatureStatus(const String &signature);
     uint32_t _computeUnitLimit = 0;
 
     // Internal transaction building functions
