@@ -2,11 +2,17 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
+#include <esp_sleep.h>
 #include <random>
 #include <chrono>
 
 HardwareSerial Serial;
 WiFiClass WiFi;
+MockWifi g_wifi;
+int g_httpTimeout = 0, g_httpConnectTimeout = 0;
+esp_sleep_wakeup_cause_t g_wakeCause = ESP_SLEEP_WAKEUP_UNDEFINED;
+uint64_t g_sleepUs = 0;
+int g_deepSleeps = 0;
 bool g_serialQuiet = true;
 MockSocket *g_mockSocket = nullptr;
 int g_tlsInsecureCount = 0;

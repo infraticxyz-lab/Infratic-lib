@@ -13,6 +13,8 @@
 #include <WiFiClient.h>
 #include <Preferences.h>
 #include <deque>
+#include <WiFi.h>
+#include <esp_sleep.h>
 #include <mbedtls/x509_crt.h>
 #include <WiFiClientSecure.h>
 #include <algorithm>
@@ -1053,6 +1055,64 @@ static void testTls()
     CHECK(slotCalls == 4, "all calls reached the server");
 }
 
+static void testLowPower()
+{
+    g_group = "lowpower";
+    CHECK(LowPower::begin() == 1 && LowPower::begin() == 2 && LowPower::bootCount() == 2, "boot counter");
+    g_wakeCause = ESP_SLEEP_WAKEUP_TIMER;
+    CHECK(LowPower::wokeFromTimer(), "timer wake");
+    g_wakeCause = ESP_SLEEP_WAKEUP_UNDEFINED;
+
+    g_wifi = MockWifi();
+    CHECK(LowPower::connectWiFi("net", "pass") && !LowPower::lastConnectWasFast() && g_wifi.scanBegins == 1, "first connect scans");
+    g_wifi.connected = false;
+    CHECK(LowPower::connectWiFi("net", "pass") && LowPower::lastConnectWasFast() && g_wifi.fastBegins == 1 && g_wifi.scanBegins == 1, "second connect uses cached channel/bssid");
+    g_wifi.connected = false;
+    CHECK(LowPower::connectWiFi("other", "pass") && !LowPower::lastConnectWasFast() && g_wifi.scanBegins == 2, "other ssid does not use the cache");
+    g_wifi.connected = false; g_wifi.apChannel = 11; // router moved to another channel
+    CHECK(LowPower::connectWiFi("other", "pass") && !LowPower::lastConnectWasFast() && g_wifi.fastBegins == 2 && g_wifi.scanBegins == 3, "stale cache falls back to scan");
+    g_wifi.connected = false;
+    CHECK(LowPower::connectWiFi("other", "pass") && LowPower::lastConnectWasFast(), "cache updated after fallback");
+    g_wifi.connected = false; g_wifi.reachable = false;
+    unsigned long t0 = millis();
+    CHECK(!LowPower::connectWiFi("other", "pass", 3000) && millis() - t0 < 4000, "unreachable network gives up after the timeout");
+    g_wifi.reachable = true;
+    LowPower::forgetWiFi(); g_wifi.connected = false;
+    CHECK(LowPower::connectWiFi("other", "pass") && !LowPower::lastConnectWasFast(), "forgetWiFi");
+
+    g_deepSleeps = 0;
+    LowPower::sleep(300);
+    CHECK(g_deepSleeps == 1 && g_sleepUs == 300000000ULL && g_wifi.mode == WIFI_OFF && !g_wifi.connected, "sleep turns radio off, timer set");
+
+    g_group = "queue";
+    DataQueue q("tq", 3);
+    q.clear();
+    CHECK(q.size() == 0, "empty");
+    CHECK(q.push(String("a")) && q.push(String("bb")) && q.size() == 2, "push");
+    std::vector<uint8_t> v;
+    CHECK(q.peek(0, v) && std::string(v.begin(), v.end()) == "a" && q.peek(1, v) && std::string(v.begin(), v.end()) == "bb" && !q.peek(2, v), "peek order");
+    q.push(String("c")); q.push(String("d")); // full: drops "a"
+    CHECK(q.size() == 3 && q.peek(0, v) && std::string(v.begin(), v.end()) == "bb" && q.peek(2, v) && std::string(v.begin(), v.end()) == "d", "drops oldest when full");
+    DataQueue again("tq", 3); // after a reboot
+    CHECK(again.size() == 3 && again.peek(1, v) && std::string(v.begin(), v.end()) == "c", "persists in nvs");
+    CHECK(again.pop(2) && again.size() == 1 && again.peek(0, v) && std::string(v.begin(), v.end()) == "d", "pop");
+    std::vector<uint8_t> bin = {0, 1, 2, 255};
+    CHECK(again.push(bin) && again.push(std::vector<uint8_t>()) && again.size() == 3, "binary and empty entries");
+    CHECK(again.peek(1, v) && v == bin && again.peek(2, v) && v.empty(), "binary and empty read back");
+    again.clear();
+    size_t keys = 0; for (auto &kv : g_nvs["infratic_q"]) if (kv.first.rfind("tq", 0) == 0 && kv.first != "tq_s") keys++;
+    CHECK(again.size() == 0 && keys == 0, "clear removes entries");
+    DataQueue other("other", 3);
+    CHECK(other.size() == 0, "queues are separate");
+
+    g_group = "timeout";
+    Infratic sol("https://mock.rpc");
+    sol.setTimeout(3000);
+    g_httpHandler = [&](const std::string &, const std::string &) -> MockHttpResponse { return {200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":7}"}; };
+    uint64_t h = 0;
+    CHECK(sol.getBlockHeight(h) && h == 7 && g_httpTimeout == 3000 && g_httpConnectTimeout == 3000, "timeout applied to http client");
+}
+
 static void testRpcHelpers(Infratic &sol) {
     g_group = "rpc";
     std::string lastBody;
@@ -1130,6 +1190,7 @@ int main(int argc, char **argv) {
     testKeys(doc["bip39"]);
     testDeviceSignatures(sol, doc["ed25519"]);
     testTls();
+    testLowPower();
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");

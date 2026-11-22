@@ -45,6 +45,7 @@
 - ✅ Generic `rpcCall()` for any JSON-RPC method
 - ✅ `getAccountData`, `getProgramAccounts` (with `dataSize` / `memcmp` filters), `getSignaturesForAddress`
 - ✅ `getMinimumBalanceForRentExemption`
+- ✅ Low power flow: fast WiFi reconnect after deep sleep, persistent data queue, RPC timeouts
 - ✅ Verified TLS: server certificates are checked against built-in root CAs of the common RPC providers
 
 ---
@@ -202,6 +203,37 @@ sol.sendSignedData(device, payer, data, sig);     // ed25519 verify ix + memo wi
 ```
 
 For your own program, add `Infratic::ed25519SignIx(device, data)` before your instruction and read it from the instructions sysvar (`INFRATIC_SYSVAR_INSTRUCTIONS_ID`). `Infratic::verifySignature()` checks a signature locally.
+
+---
+
+## 🔋 Low Power
+
+Wake up, measure, queue the reading, send a batch every few wakes, sleep again.
+
+```cpp
+DataQueue queue("temp", 32);              // kept in NVS, survives sleep and power loss
+
+void setup() {
+    uint32_t boot = LowPower::begin();    // 1 = cold boot
+    queue.push(String(readTemperature(), 1));
+
+    if (boot % 10 == 0) {
+        if (LowPower::connectWiFi(SSID, PASS, 8000)) {   // reuses channel + BSSID, skips the scan
+            sol.setTimeout(5000);
+            String batch;
+            std::vector<uint8_t> v;
+            for (uint16_t i = 0; i < queue.size() && queue.peek(i, v); i++)
+                batch += String((const char *)v.data(), v.size()) + ";";
+            std::vector<uint8_t> data(batch.begin(), batch.end());
+            String sig;
+            if (sol.sendSignedData(device, payer, data, sig)) queue.clear();
+        }
+    }
+    LowPower::sleep(60);                  // radio off, deep sleep, setup() runs again
+}
+```
+
+When the queue is full the oldest entry is dropped. The WiFi cache lives in RTC memory, so it is gone after a power loss and the next connect scans once.
 
 ---
 

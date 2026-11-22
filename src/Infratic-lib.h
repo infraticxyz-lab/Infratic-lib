@@ -153,6 +153,52 @@ private:
     bool decrypt(const String &pin, uint8_t &outType, std::vector<uint8_t> &outSecret);
 };
 
+/**
+ * @brief Helpers for battery powered devices: fast WiFi reconnect after deep sleep,
+ *        sleeping with the radio off, and a boot counter kept in RTC memory.
+ */
+class LowPower
+{
+public:
+    // Counts boots since power on (1 = cold boot). Call once at the start of setup().
+    static uint32_t begin();
+    static uint32_t bootCount();
+    static bool wokeFromTimer();
+
+    // Connects with the channel and BSSID remembered from the last connect (skips the scan,
+    // usually well under a second), falls back to a normal connect if that fails.
+    static bool connectWiFi(const char *ssid, const char *password, uint32_t timeoutMs = 10000);
+    static bool lastConnectWasFast();
+    static void forgetWiFi();
+
+    // Turns WiFi off and enters deep sleep. On the device this does not return, setup() runs again on wake.
+    static void sleep(uint64_t seconds);
+};
+
+/**
+ * @brief Small persistent queue in NVS (survives deep sleep and power loss).
+ *        Collect readings on every wake, send them together every few wakes.
+ *        When full, the oldest entry is dropped.
+ */
+class DataQueue
+{
+public:
+    explicit DataQueue(const String &name = "queue", uint16_t capacity = 32); // name: max 9 chars
+    bool push(const std::vector<uint8_t> &data);
+    bool push(const String &text);
+    uint16_t size();
+    bool peek(uint16_t index, std::vector<uint8_t> &out); // 0 = oldest
+    bool pop(uint16_t count = 1);
+    void clear();
+
+private:
+    String _name;
+    uint16_t _capacity;
+    bool load(uint16_t &head, uint16_t &count);
+    bool store(uint16_t head, uint16_t count);
+    String slot(uint16_t i) const;
+};
+
 struct AccountMeta
 {
     Pubkey pubkey;
@@ -798,6 +844,12 @@ public:
     void setTlsInsecure(bool insecure = true);
 
     /**
+     * @brief HTTP connect / read timeout for RPC calls (default 10000 ms).
+     *        Lower it on battery devices so a dead network costs less awake time.
+     */
+    void setTimeout(uint32_t ms);
+
+    /**
      * @brief Reads raw account data (base64 decoded)
      * @param accountBase58 Account address
      * @param outData Account data bytes
@@ -1275,6 +1327,7 @@ private:
     String _rpcUrl;
     const char *_rootCA = nullptr;
     bool _tlsInsecure = false;
+    uint32_t _timeoutMs = 10000;
     void configureTls(WiFiClientSecure &client);
     // POST to the RPC endpoint, true on HTTP 200
     bool httpPost(const String &body, String &outResponse, int &outCode);

@@ -27,6 +27,11 @@ void Infratic::configureTls(WiFiClientSecure &client)
     }
 }
 
+void Infratic::setTimeout(uint32_t ms)
+{
+    _timeoutMs = ms;
+}
+
 bool Infratic::httpPost(const String &body, String &outResponse, int &outCode)
 {
     WiFiClientSecure client;
@@ -48,6 +53,8 @@ bool Infratic::httpPost(const String &body, String &outResponse, int &outCode)
         return false;
     }
 
+    http.setConnectTimeout(_timeoutMs);
+    http.setTimeout(_timeoutMs > 65535 ? 65535 : (uint16_t)_timeoutMs);
     http.addHeader("Content-Type", "application/json");
     outCode = http.POST(body);
     outResponse = http.getString();
