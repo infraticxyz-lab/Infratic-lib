@@ -1,5 +1,6 @@
 #include "base58.h"
 #include <vector>
+#include <string>
 #include <Arduino.h>
 
 /**

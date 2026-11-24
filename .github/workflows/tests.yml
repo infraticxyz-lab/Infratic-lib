@@ -38,13 +38,21 @@ jobs:
         run: |
           npm ci
           node gen.mjs > ../vectors.json
-          for g in gen_*.mjs; do [ -e "$g" ] && node "$g"; done
+          for g in gen_*.mjs; do if [ -e "$g" ]; then node "$g"; fi; done
       - name: compare
         run: git diff --exit-code -- test/host
 
   esp32:
-    name: ESP32 build
+    name: ESP32 build (${{ matrix.core }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - core: arduino-esp32 2.x
+            platform: espressif32@6.9.0
+          - core: arduino-esp32 3.x
+            platform: espressif32@8.0.0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -53,12 +61,13 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: pio-${{ hashFiles('library.json') }}
+          key: pio-${{ matrix.platform }}
       - run: pip install platformio
       - name: compile the example
         run: >
           pio ci examples/SolExample
           --lib . --board esp32dev
+          --project-option "platform=${{ matrix.platform }}"
           --project-option "lib_deps=bblanchon/ArduinoJson@^6.21.5, rweather/Crypto@^0.4.0"
           --project-option "build_unflags=-std=gnu++11"
           --project-option "build_flags=-std=gnu++17"

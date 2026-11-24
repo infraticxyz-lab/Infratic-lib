@@ -5,6 +5,7 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <WiFi.h> // WiFiClient (arduino-esp32 3.x moved it out of WiFiClientSecure.h)
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
