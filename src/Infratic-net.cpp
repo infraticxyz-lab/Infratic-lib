@@ -120,7 +120,7 @@ bool Infratic::rpcCall(const String &method, const String &paramsJson, String &o
     StaticJsonDocument<32> filter;
     filter["error"] = true;
     DynamicJsonDocument err(512);
-    if (deserializeJson(err, outResponse, DeserializationOption::Filter(filter)))
+    if (deserializeJson(err, outResponse, DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(64)))
     {
         _logErr.println("❌ " + method + ": JSON parse error");
         return false;

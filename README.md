@@ -458,6 +458,39 @@ A v0 message can load accounts from address lookup tables, which cannot be resol
 
 ---
 
+## 🔎 More RPC Methods
+
+Typed helpers for the most used read methods. All go through `rpcCall`, so TLS verification and endpoint failover apply. Addresses and signatures are validated before anything is sent.
+
+```cpp
+uint64_t slot; solana.getSlot(slot);              // commitment defaults to "confirmed"
+String ver;    solana.getVersion(ver);            // solana-core of the node
+bool ok = solana.getHealth();                     // false when the node reports unhealthy
+
+// up to 100 accounts per RPC call - longer lists are split automatically
+std::vector<AccountInfo> accs;
+solana.getMultipleAccounts({KEY_A, KEY_B}, accs); // accs[i].exists == false for missing accounts
+
+// token accounts of a wallet (INFRATIC_TOKEN_2022_PROGRAM_ID for Token-2022)
+std::vector<TokenAccount> tokens;
+solana.getTokenAccountsByOwner(MY_PUBKEY, tokens);
+for (auto &t : tokens) Serial.println(t.mint + " " + t.uiAmount);
+
+// did my transaction land?
+std::vector<SignatureStatus> st;
+solana.getSignatureStatuses({sig}, st);           // st[0].found / confirmationStatus / failed / err
+TransactionInfo tx;
+solana.getTransaction(sig, tx);                   // tx.found == false if not available (yet)
+
+uint64_t fee;
+if (!solana.getFeeForMessage(messageBase64, fee)) { /* blockhash expired */ }
+solana.requestAirdrop(MY_PUBKEY, 1000000000, sig); // devnet / testnet only
+```
+
+Also: `getAccountInfo`, `getTokenSupply`, and `getSolBalance(addr, lamports, commitment)`. A transaction or account that does not exist is not an error (`found` / `exists` is false); RPC errors and unparsable answers return `false`. `getTransaction` keeps only fee, balances, account keys (including lookup-table accounts of v0 transactions) and logs.
+
+---
+
 ## 📣 Anchor Events
 
 ```cpp

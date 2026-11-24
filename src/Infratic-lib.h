@@ -16,6 +16,7 @@
 
 #include "base58.h"
 #include "infratic_metadata.h"
+#include "infratic_rpc.h"
 
 #define INFRATIC_VERSION "1.3.0"
 
@@ -983,6 +984,64 @@ public:
 
     /** @brief Current cluster unix time (getSlot + getBlockTime) */
     bool getClusterTime(int64_t &outUnixTime);
+
+    // ========================================================================
+    // MORE RPC METHODS
+    // ========================================================================
+    // All of them go through rpcCall(), so TLS and endpoint failover apply.
+    // Addresses and signatures are validated before the request is sent.
+    // commitment: "processed", "confirmed" or "finalized"
+
+    /** @brief SOL balance with an explicit commitment */
+    bool getSolBalance(const String &walletPubkeyBase58, uint64_t &outLamports, const String &commitment);
+
+    /** @brief Current slot */
+    bool getSlot(uint64_t &outSlot, const String &commitment = "confirmed");
+
+    /** @brief true if the node answers "ok" (an unhealthy node answers with an RPC error) */
+    bool getHealth();
+
+    /** @brief solana-core version of the node */
+    bool getVersion(String &outSolanaCore);
+
+    /** @brief One account (base64 data). A missing account is not an error: out.exists = false */
+    bool getAccountInfo(const String &accountBase58, AccountInfo &out, const String &commitment = "confirmed");
+
+    /**
+     * @brief Several accounts, in the order of keys (out.size() == keys.size()).
+     *        More than 100 keys are split into several calls (RPC limit).
+     */
+    bool getMultipleAccounts(const std::vector<String> &keys, std::vector<AccountInfo> &out,
+                             const String &commitment = "confirmed");
+
+    /**
+     * @brief Token accounts of an owner (jsonParsed, only the needed fields are kept)
+     * @param programId INFRATIC_TOKEN_PROGRAM_ID or INFRATIC_TOKEN_2022_PROGRAM_ID
+     */
+    bool getTokenAccountsByOwner(const String &ownerBase58, std::vector<TokenAccount> &out,
+                                 const String &programId = INFRATIC_TOKEN_PROGRAM_ID,
+                                 const String &commitment = "confirmed");
+
+    /** @brief Total supply of a mint (raw amount and decimals) */
+    bool getTokenSupply(const String &mintBase58, uint64_t &outAmount, uint8_t &outDecimals,
+                        const String &commitment = "confirmed");
+
+    /**
+     * @brief Status of several signatures, in order (at most 256 per call, more are split)
+     * @param searchHistory also search the ledger history, not only the recent status cache
+     */
+    bool getSignatureStatuses(const std::vector<String> &sigs, std::vector<SignatureStatus> &out,
+                              bool searchHistory = false);
+
+    /** @brief Transaction details (legacy and v0). A missing transaction gives true with found = false */
+    bool getTransaction(const String &signature, TransactionInfo &out, const String &commitment = "confirmed");
+
+    /** @brief Devnet / testnet faucet. */
+    bool requestAirdrop(const String &addressBase58, uint64_t lamports, String &outSignature);
+
+    /** @brief Fee for a serialized message (base64). false if the blockhash is unknown / expired (value null) */
+    bool getFeeForMessage(const String &messageBase64, uint64_t &outLamports,
+                          const String &commitment = "confirmed");
 
     // ========================================================================
     // CRYPTOGRAPHIC OPERATIONS
