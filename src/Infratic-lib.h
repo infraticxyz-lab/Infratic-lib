@@ -563,6 +563,8 @@ typedef std::function<void(int handle, const String &signature, bool failed)> Si
 
 struct InfraticWsState; // internal
 
+#include "infratic_offchain.h" // off-chain messages, SIWS, Solana Pay URLs (needs Pubkey, Keypair)
+
 // ============================================================================
 // MAIN LIBRARY CLASS
 // ============================================================================
@@ -1486,6 +1488,8 @@ public:
 
     // ========================================================================
     // Token metadata (names, symbols, logos)
+    // =================================================================
+
     // ========================================================================
 
     /**
@@ -1505,6 +1509,37 @@ public:
      * @return false if the mint account could not be read
      */
     bool getTokenMetadata(const String &mintBase58, TokenMetadata &out, const String &commitment = "confirmed");
+
+    // ========================================================================
+    // SOLANA PAY (RPC part; URLs are encoded / parsed by SolanaPay, see infratic_offchain.h)
+    // ========================================================================
+
+    /**
+     * @brief Finds the oldest transaction that references `reference` (getSignaturesForAddress,
+     * paged). Like findReference() of @solana/pay; false if there is none yet (outError "not found").
+     */
+    bool findReference(const String &reference, String &outSignature, const String &commitment = "confirmed",
+                       String *outError = nullptr);
+
+    /**
+     * @brief Checks that a confirmed transaction contains the requested Solana Pay transfer:
+     * transaction succeeded, recipient (or its token account) received at least the amount,
+     * references are exactly the extra keys of the last (transfer) instruction, memo (if given)
+     * is the instruction before it. Like validateTransfer() of @solana/pay.
+     */
+    bool validateTransfer(const String &signature, const PayTransfer &expected, String *outError = nullptr,
+                          const String &commitment = "confirmed");
+    bool validateTransfer(const String &signature, const String &recipient, const String &amount,
+                          const String &splToken = "", const String &reference = "", String *outError = nullptr);
+
+    /**
+     * @brief Builds the unsigned transfer transaction for a request (like createTransfer() of
+     * @solana/pay): optional memo, then a system transfer or SPL transferChecked with the
+     * references appended as read-only keys. Checks accounts and balances over RPC.
+     * Sign it with tx.sign({keypair}) and send it with sendAndConfirm / signAndSend.
+     */
+    bool createPayTransfer(const PayTransfer &request, const String &senderBase58, Transaction &outTx,
+                           String *outError = nullptr);
 
 private:
     String _rpcUrl;

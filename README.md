@@ -566,6 +566,48 @@ Infratic::createCommitmentAttestation(device, commitment, "temp-sensor/v1", {}, 
 ok = Infratic::verifyCommitmentAttestation(att, device.publicBase58());
 ```
 
+---
+
+## 📝 Messages, Sign-In With Solana and Solana Pay
+
+```cpp
+// Off-chain message (spec v0): what wallets sign for "sign this message"
+OffchainMessage m;
+Offchain::make("11111111111111111111111111111111" /* application domain, base58 */,
+               OffchainFormat::Utf8Limited, device.pubkey(), "Pair this device", m);
+std::vector<uint8_t> content, envelope;
+Offchain::build(m, content);                       // checks ASCII range / UTF-8 / length limits
+Offchain::buildEnvelope(content, {device}, envelope);
+Offchain::verifyEnvelope(envelope);
+
+// Sign-In With Solana (same text layout as Phantom / @solana/wallet-standard-util)
+SignInMessage in;
+in.domain = "example.com"; in.statement = "Sign in"; in.nonce = "k3j4h5g6"; in.issuedAt = "2026-01-01T00:00:00.000Z";
+String text; uint8_t sig[64];
+Siws::sign(in, device, text, sig);                 // address is taken from the keypair
+Siws::verify(in, std::vector<uint8_t>(text.c_str(), text.c_str() + text.length()), sig, device.pubkey(), nowUnix);
+
+// Solana Pay: URL, then wait for the payment and check it
+PayTransfer req;
+req.recipient = MERCHANT; req.amount = "1.5"; req.references.push_back(REFERENCE_PUBKEY); req.label = "Coffee";
+String url = SolanaPay::encodeTransfer(req);       // solana:<merchant>?amount=1.5&reference=...&label=Coffee
+String found;
+if (solana.findReference(REFERENCE_PUBKEY, found) && solana.validateTransfer(found, req)) { /* paid */ }
+
+// Pay a request received from a QR code
+PayTransfer parsed; Transaction tx;
+SolanaPay::parseTransfer(scannedUrl, parsed);
+solana.createPayTransfer(parsed, device.publicBase58(), tx);   // memo + transfer + reference keys
+String txSig;
+solana.signAndSend(tx, {device}, txSig);
+```
+
+Notes: the size limits follow `@solana/offchain-messages` (body at most 1232 bytes minus the header for the two "limited" formats, 65535 for extended); only message version 0 is supported. `Siws::buildText` refuses fields with line breaks (the reference does not). An empty `resources` list cannot be told apart from none. `validateTransfer` also accepts Token-2022 transfers. Transaction request links must be `https` without user info.
+
+---
+
+## 🔏 Proof Helpers (ZK)
+
 Anchor storage (`initializeZKStorage`, `storeCommitmentInAnchor`, `updateCommitmentInAnchor`, `storeMerkleRootInAnchor`, `storeBatchInAnchor`) sends `sha256("global:<name>")[0..8]` plus Borsh arguments to your own program; the exact argument lists are in the header. Timestamps are the cluster unix time.
 
 **Deprecated names** (still compile, with a warning): `createDataCommitment`/`verifyDataCommitment` (use `commitString`), `createTimestampedProof`/`verifyTimestampedProof` (an unsigned hash; use `createSignedTimestamp`), `verifyMerkleProof(data, proof)` (trusts the root inside the proof). `createzkSNARKProof`, `verifyzkSNARKProof`, `createRangeProof`, `verifyRangeProof` were fakes and now always return `false`; use `createCommitmentAttestation` / `createRangeAttestation`.
