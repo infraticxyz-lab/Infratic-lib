@@ -377,6 +377,38 @@ solana.getAssociatedTokenAddress(OWNER, MINT, ata); // no RPC call
 
 ---
 
+## 🧱 Instruction Builders
+
+Static builders that return plain `Instruction` objects (no RPC) for the System program, SPL Token / Token-2022, the Associated Token program and the Memo program. Mix them freely in one `Transaction`. Accounts and data are byte-identical to `@solana/web3.js` and `@solana/spl-token` (checked by the host tests).
+
+```cpp
+Pubkey token = Pubkey::fromBase58(INFRATIC_TOKEN_2022_PROGRAM_ID); // or INFRATIC_TOKEN_PROGRAM_ID
+
+Transaction tx;
+tx.add(SystemProgram::createAccountIx(payer, mintKey, rentLamports, 82, token));
+tx.add(SplToken::initializeMint2Ix(mintKey, 6, payer, nullptr, token));     // nullptr = no freeze authority
+tx.add(SplToken::mintToCheckedIx(mintKey, destAta, payer, 1000000, 6, token));
+tx.add(MemoProgram::memoIx("minted from an ESP32"));
+solana.signAndSend(tx, {payerKeypair, mintKeypair}, sig);
+
+String addr; // seed accounts: sha256(base || seed || program), seed up to 32 bytes
+SystemProgram::createWithSeed(base, "vault", owner, addr);
+
+// Wrapped SOL: creates the wSOL ATA if needed, transfers and syncs / closes it again
+solana.wrapSol(keypair, 50000000, sig);   // 0.05 SOL
+solana.unwrapSol(keypair, sig);
+```
+
+| Class | Builders |
+|---|---|
+| `SystemProgram` | `transferIx`, `createAccountIx`, `assignIx`, `allocateIx`, `createAccountWithSeedIx`, `transferWithSeedIx`, `createWithSeed` |
+| `SplToken` | `initializeMint2Ix`, `initializeAccount3Ix`, `transferIx`, `mintToIx`, `mintToCheckedIx`, `burnIx`, `burnCheckedIx`, `approveIx`, `approveCheckedIx`, `revokeIx`, `closeAccountIx`, `setAuthorityIx` (`AuthorityType`, `nullptr` removes the authority), `syncNativeIx`, `freezeAccountIx`, `thawAccountIx`, `createAssociatedTokenAccountIx` |
+| `MemoProgram` | `memoIx(text, signers)` |
+
+Every `SplToken` builder takes the token program id last, so the same code serves Token and Token-2022. Multisig owners are not supported (single signer only).
+
+---
+
 ## 📣 Anchor Events
 
 ```cpp

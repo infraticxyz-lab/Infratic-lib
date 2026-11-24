@@ -219,6 +219,8 @@ struct Instruction
     Instruction(const Pubkey &pid, const std::vector<AccountMeta> &accts, const std::vector<uint8_t> &d);
 };
 
+#include "infratic_instructions.h" // SystemProgram, SplToken, MemoProgram builders
+
 /** Address Lookup Table contents (see Infratic::getAddressLookupTable) */
 struct AddressLookupTable
 {
@@ -817,6 +819,21 @@ public:
                       const String &toOwnerBase58, const String &mintBase58, uint64_t amount,
                       String &outSignature, int decimals = -1, bool createDestinationAta = true,
                       const String &tokenProgramId = INFRATIC_TOKEN_PROGRAM_ID);
+
+    // ========================================================================
+    // INSTRUCTION BUILDERS: wrapped SOL convenience (builders: SystemProgram, SplToken, MemoProgram)
+    // ========================================================================
+
+    /**
+     * @brief Wraps SOL: creates the owner's wSOL ATA if missing, moves `lamports` into it and syncs
+     * @param tokenProgramId Token program of the native mint (classic Token program by default)
+     */
+    bool wrapSol(const Keypair &owner, uint64_t lamports, String &outSignature,
+                 const String &tokenProgramId = INFRATIC_TOKEN_PROGRAM_ID);
+
+    /** @brief Unwraps all SOL: closes the owner's wSOL ATA and returns its lamports to the owner */
+    bool unwrapSol(const Keypair &owner, String &outSignature,
+                   const String &tokenProgramId = INFRATIC_TOKEN_PROGRAM_ID);
 
     // ========================================================================
     // GENERIC RPC
