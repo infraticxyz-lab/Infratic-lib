@@ -15,6 +15,7 @@
 #include <SHA512.h>
 
 #include "base58.h"
+#include "infratic_metadata.h"
 
 #define INFRATIC_VERSION "1.3.0"
 
@@ -1351,6 +1352,28 @@ public:
         const String &authorityPubkeyBase58,
         const String &buyerPubkeyBase58,
         const String &escrowPdaBase58);
+
+    // ========================================================================
+    // Token metadata (names, symbols, logos)
+    // ========================================================================
+
+    /**
+     * @brief Metaplex metadata PDA of a mint (no RPC call)
+     */
+    bool getMetadataPda(const String &mintBase58, String &outPda);
+
+    /**
+     * @brief Metaplex master edition PDA of a mint (no RPC call)
+     */
+    bool getMasterEditionPda(const String &mintBase58, String &outPda);
+
+    /**
+     * @brief Reads name, symbol and uri of a token. Uses the Token-2022 metadata extension when the
+     *        mint has one, otherwise the Metaplex metadata account.
+     * @param out out.found is false if the mint has no metadata (the call still returns true)
+     * @return false if the mint account could not be read
+     */
+    bool getTokenMetadata(const String &mintBase58, TokenMetadata &out, const String &commitment = "confirmed");
 
 private:
     String _rpcUrl;

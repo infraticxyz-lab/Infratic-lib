@@ -409,6 +409,24 @@ Every `SplToken` builder takes the token program id last, so the same code serve
 
 ---
 
+## 🏷️ Token names and logos
+
+```cpp
+TokenMetadata meta;
+if (solana.getTokenMetadata(USDC_MINT, meta) && meta.found) {
+    Serial.println(meta.symbol);   // "USDC"
+    Serial.println(meta.name);     // "USD Coin"
+    Serial.println(meta.uri);      // off-chain JSON with the "image" (logo) URL
+    Serial.println(meta.source);   // "metaplex" or "token-2022"
+}
+```
+
+`getTokenMetadata` reads the mint, uses the Token-2022 metadata extension when the mint has one and otherwise the Metaplex Token Metadata account (one or two `getAccountInfo` calls). It returns `false` if the mint cannot be read; `meta.found` is `false` for a mint without metadata. Padding NULs of Metaplex strings are removed, and `decimals`, `updateAuthority` and `isMutable` are filled in as well.
+
+For the full records use the offline parsers on raw account data: `TokenMetadataParser::parseMetaplex()` (creators, collection, uses, token standard, ...) and `TokenMetadataParser::parseToken2022()` (MetadataPointer, TokenMetadata and `additional_metadata`). `getMetadataPda` and `getMasterEditionPda` derive the Metaplex addresses without an RPC call. The parsers check every bound and ignore unknown trailing data.
+
+---
+
 ## 📣 Anchor Events
 
 ```cpp
