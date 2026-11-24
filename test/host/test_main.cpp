@@ -9,6 +9,7 @@
 #include "Infratic-lib.h"
 #include "infratic_internal.h"
 #include <mbedtls/base64.h>
+#include <mbedtls/version.h>
 #include <mbedtls/sha1.h>
 #include <WiFiClient.h>
 #include <Preferences.h>
@@ -572,7 +573,12 @@ struct MockWsServer : MockSocket
             requestLine = req.substr(0, req.find("\r\n"));
             size_t k = req.find("Sec-WebSocket-Key: ");
             std::string key = req.substr(k + 19, req.find("\r\n", k) - k - 19) + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-            unsigned char d[20]; mbedtls_sha1_ret((const unsigned char *)key.data(), key.size(), d);
+            unsigned char d[20];
+#if defined(MBEDTLS_VERSION_MAJOR) && MBEDTLS_VERSION_MAJOR >= 3
+            mbedtls_sha1((const unsigned char *)key.data(), key.size(), d);
+#else
+            mbedtls_sha1_ret((const unsigned char *)key.data(), key.size(), d);
+#endif
             unsigned char acc[64]; size_t al = 0; mbedtls_base64_encode(acc, sizeof acc, &al, d, 20);
             std::string resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
                                std::string((char *)acc, al) + "\r\n\r\n";
@@ -1222,6 +1228,37 @@ static void testRpcHelpers(Infratic &sol) {
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// Feature tests in test/host/tests/*.cpp are compiled into this file (see
+// build.sh), so they can use the helpers above. Each one is declared with
+//   INFRATIC_TEST(name) { ... }
+// and gets test/host/vectors_<name>.json (if it exists) as `vec`.
+// ---------------------------------------------------------------------------
+struct ExtraTest { const char *name; void (*fn)(Infratic &, JsonVariant); };
+static std::vector<ExtraTest> &extraTests() { static std::vector<ExtraTest> v; return v; }
+struct ExtraTestReg { ExtraTestReg(const char *n, void (*f)(Infratic &, JsonVariant)) { extraTests().push_back({n, f}); } };
+#define INFRATIC_TEST(name)                                       \
+    static void name(Infratic &sol, JsonVariant vec);             \
+    static ExtraTestReg reg_##name(#name, name);                  \
+    static void name(Infratic &sol, JsonVariant vec)
+#include "extra_tests.inc"
+
+static void runExtraTests(Infratic &sol, const std::string &dir)
+{
+    for (const ExtraTest &t : extraTests())
+    {
+        DynamicJsonDocument d(1 << 22);
+        std::ifstream f(dir + "/vectors_" + t.name + ".json");
+        if (f)
+        {
+            std::stringstream ss; ss << f.rdbuf();
+            if (deserializeJson(d, ss.str())) { printf("bad vectors_%s.json\n", t.name); g_fail++; continue; }
+        }
+        g_group = t.name;
+        t.fn(sol, d.as<JsonVariant>());
+    }
+}
+
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "vectors.json";
     std::ifstream f(path);
@@ -1255,6 +1292,11 @@ int main(int argc, char **argv) {
     testTls();
     testLowPower();
     testFailover();
+    {
+        std::string dir(path);
+        size_t slash = dir.find_last_of('/');
+        runExtraTests(sol, slash == std::string::npos ? "." : dir.substr(0, slash));
+    }
 #endif
 
     printf("\n%-14s %6s %6s\n", "group", "pass", "fail");
