@@ -427,6 +427,37 @@ For the full records use the offline parsers on raw account data: `TokenMetadata
 
 ---
 
+## 🧾 Signing transactions built elsewhere
+
+A hardware wallet should show what it signs. `ParsedTransaction` parses a transaction made by a dApp or a phone (legacy or v0), decodes the instructions for a confirmation screen and adds the device signature without touching the message.
+
+```cpp
+ParsedTransaction tx;
+if (!tx.fromBase64(b64FromPhone)) { /* tx.error() says why: bad length, index out of range, ... */ }
+
+// 1. show what is about to happen
+for (const DecodedInstruction &d : tx.decodeAll()) {
+    Serial.println(d.summary);                 // "Transfer 0.25 SOL to 9WzD...AWWM"
+    if (!d.known || !d.resolved) { /* warn: unknown program, or accounts hidden in a lookup table */ }
+}
+TxCostEstimate c = tx.estimateCost(myKeypair.publicBase58());
+Serial.println(ParsedTransaction::formatSol(c.totalLamports));   // fee + SOL leaving this wallet
+
+// 2. after the user presses the button
+if (tx.sign(myKeypair)) {                      // false if the key is not a required signer
+    String back = tx.toBase64();               // other signers' signatures are kept
+    bool done = tx.isFullySigned();            // all signatures present and valid
+}
+```
+
+Parsing is strict because the input is untrusted: more than 1232 bytes, trailing bytes, non-canonical lengths, too many signatures, and program or account indexes out of range are all rejected, and `serialize()` reproduces the input byte for byte. `verifySignatures(&missing)` checks the signatures that are present and lists the empty slots.
+
+The decoder knows System (transfer, createAccount, advanceNonce), SPL Token and Token-2022 (transfer, transferChecked, approve, approveChecked, mintTo, burn, closeAccount), Associated Token (create, createIdempotent), Compute Budget and Memo. Everything else, including unknown instructions of those programs such as `setAuthority`, gets `known == false` so the wallet can warn.
+
+A v0 message can load accounts from address lookup tables, which cannot be resolved offline: those accounts show up unresolved (`resolved == false`, empty key fields). If you have the table contents, for example from `getAddressLookupTable`, pass them with `tx.setLookupTable(tableAddress, addressesBase58)` before decoding. `estimateCost` counts 5000 lamports per signature, the priority fee from the compute budget instructions (200k units per instruction if no limit is set) and the SOL that System transfers and createAccount take from the signer. `complete == false` means some instruction is not understood and could move more.
+
+---
+
 ## 📣 Anchor Events
 
 ```cpp
