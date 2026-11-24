@@ -505,11 +505,37 @@ Other calls: `escrow_cancel` (after expiration, checked with cluster time), `esc
 
 ---
 
-## 🔏 Proof Helpers (ZK)
+## 🔏 Commitments, Merkle trees and signed attestations
 
-`createDataCommitment`, Merkle tree proofs, range proofs, timestamped proofs and batch commitments are hash based commitment helpers.
+> **None of this is zero-knowledge.** The library has no zkSNARK prover and no cryptographic range proofs. It offers three honest building blocks. For real ZK (circom/snarkjs, Bulletproofs) generate the proof off the device and anchor the result on chain.
 
-> ⚠️ `createzkSNARKProof` / `verifyzkSNARKProof` are **simplified placeholders**, not real zkSNARKs. They don't provide zero-knowledge or soundness guarantees. Use circom/snarkjs (or similar) for production proofs.
+| Helper | What it proves | What it does not prove |
+|---|---|---|
+| `commitString` / `commitData` / `verifyCommitment*` | `SHA-256("infratic-zk/commit/v1" ‖ u32le(len) ‖ data ‖ 32 random bytes)`: hides the data while the secret is private, binds you to it. Verification is constant time. | Nothing about the content or the time. |
+| `buildMerkleTree`, `createMerkleProof`, `verifyMerkleProof(data, proof, trustedRoot)` | One item is part of a set with a given root (RFC 6962 shape: leaf `SHA-256(0x00‖d)`, node `SHA-256(0x01‖l‖r)`, odd nodes are promoted, never duplicated; max 4096 leaves). | The root must come from a trusted place (the chain), not from the proof. Sibling hashes are visible. |
+| `createCommitmentAttestation`, `signTimestamp` / `createSignedTimestamp`, `createRangeAttestation` | An Ed25519 signature by the device key over a domain-tagged, length-prefixed statement; anyone with the public key can verify. | That the statement is true. A "range attestation" hides the value from the verifier but they must trust the signer. A signed timestamp is only as good as the device and its RPC node. |
+
+```cpp
+String commitment, secret;
+Infratic::commitString("temp:25.7C", commitment, secret);        // keep `secret` private
+String sig;
+solana.storeCommitmentOnChain(PRIV, PUB, commitment, "sensor:1", sig); // memo; the block time is the real timestamp
+bool ok = Infratic::verifyCommitmentString("temp:25.7C", secret, commitment);
+
+std::vector<String> readings = {"a", "b", "c"};
+String root; Infratic::buildMerkleTree(readings, root);
+MerkleProof proof; Infratic::createMerkleProof(readings, 1, proof);
+ok = Infratic::verifyMerkleProof("b", proof, root);                 // root from a trusted source
+
+Keypair device = Keypair::fromBase58(PRIV);
+CommitmentAttestation att;
+Infratic::createCommitmentAttestation(device, commitment, "temp-sensor/v1", {}, att);
+ok = Infratic::verifyCommitmentAttestation(att, device.publicBase58());
+```
+
+Anchor storage (`initializeZKStorage`, `storeCommitmentInAnchor`, `updateCommitmentInAnchor`, `storeMerkleRootInAnchor`, `storeBatchInAnchor`) sends `sha256("global:<name>")[0..8]` plus Borsh arguments to your own program; the exact argument lists are in the header. Timestamps are the cluster unix time.
+
+**Deprecated names** (still compile, with a warning): `createDataCommitment`/`verifyDataCommitment` (use `commitString`), `createTimestampedProof`/`verifyTimestampedProof` (an unsigned hash; use `createSignedTimestamp`), `verifyMerkleProof(data, proof)` (trusts the root inside the proof). `createzkSNARKProof`, `verifyzkSNARKProof`, `createRangeProof`, `verifyRangeProof` were fakes and now always return `false`; use `createCommitmentAttestation` / `createRangeAttestation`.
 
 ---
 

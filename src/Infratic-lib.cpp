@@ -1347,1319 +1347,910 @@ String Transaction::serializeBase64() const
 }
 
 // ============================================================================
-// ZERO-KNOWLEDGE PROOF SYSTEM FOR INFRATIC
-// Complete implementation with Hash-based, Merkle Tree, and lightweight zkSNARK
+// COMMITMENTS, MERKLE TREES AND SIGNED ATTESTATIONS ("ZK" helpers)
+//
+// What is here, honestly:
+//  - hash commitments: SHA-256 over a domain tag, the length-prefixed data and a
+//    32 byte random secret. Hiding (while the secret is private) and binding.
+//  - Merkle trees (RFC 6962 shape, 0x00/0x01 domain separation): prove that one
+//    item belongs to a set with a known root.
+//  - Ed25519 attestations by the device key: prove WHO vouches for a statement.
+// Nothing here is zero-knowledge or proves a statement about hidden data
+// mathematically; the verifier always trusts either the hash function (commitments,
+// Merkle) or the signer (attestations).
 // ============================================================================
 
-// ============================================================================
-// ZK STRUCTURES
-// ============================================================================
-
-// struct ZKCommitment {
-//     String commitment;      // SHA256 hash of data
-//     String nonce;          // Random nonce for security
-//     uint64_t timestamp;    // Creation timestamp
-//     String metadata;       // Optional metadata
-// };
-
-// struct MerkleProof {
-//     String root;                      // Merkle root hash
-//     std::vector<String> siblings;     // Sibling hashes for proof path
-//     size_t index;                     // Leaf index in tree
-//     bool isValid;                     // Proof validity flag
-// };
-
-// struct RangeProof {
-//     int64_t minValue;
-//     int64_t maxValue;
-//     String commitment;
-//     String proof;
-//     bool isValid;
-// };
-
-// struct zkSNARKProof {
-//     std::vector<uint8_t> proofData;   // Compressed proof data
-//     std::vector<uint8_t> publicInputs; // Public inputs
-//     bool isValid;
-// };
-
-// ============================================================================
-// SECTION A: HASH-BASED ZK (Simple Commitment Scheme)
-// ============================================================================
-
-/**
- * @brief Creates a cryptographic commitment to hide data
- *
- * Uses SHA256(data || secret || nonce || timestamp) to create a binding commitment.
- * The data remains hidden until explicitly revealed with the correct secret.
- *
- * @param data Original data to commit (e.g., "temperature:25.7")
- * @param secret Secret key for additional security
- * @param outCommitment Output commitment hash (32 bytes hex)
- * @param outNonce Output nonce used in commitment
- * @param outTimestamp
- * @return true if successful
- */
-bool Infratic::createDataCommitment(
-    const String &data,
-    const String &secret,
-    String &outCommitment,
-    String &outNonce,
-    uint64_t &outTimestamp)
+namespace
 {
-    // Generate random nonce
-    uint8_t nonceBytes[16];
-    for (int i = 0; i < 16; i++)
+    const char ZK_TAG_COMMIT[] = "infratic-zk/commit/v1";
+    const char ZK_TAG_ATTEST[] = "infratic-zk/attest/v1";
+    const char ZK_TAG_TIME[] = "infratic-zk/timestamp/v1";
+    const char ZK_TAG_RANGE[] = "infratic-zk/range/v1";
+    const char ZK_TAG_LEGACY_TIME[] = "infratic-zk/legacy-timestamp/v1";
+    const size_t ZK_MAX_LEAVES = 4096;      // 128 KB of leaf hashes
+    const size_t ZK_MAX_MEMO_META = 400;    // keeps the memo well inside a legacy transaction
+    const size_t ZK_MAX_TX_BYTES = 1232;    // Solana packet limit for a serialized transaction
+
+    // Incremental SHA-256
+    struct Sha
     {
-        nonceBytes[i] = random(0, 256);
-    }
-    outNonce = base58Encode(nonceBytes, 16);
-
-    // Get timestamp
-    outTimestamp = millis();
-
-    // Create commitment: SHA256(data || secret || nonce || timestamp)
-    String commitmentInput = data + secret + outNonce + String(outTimestamp);
-
-    uint8_t hash[32];
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts_ret(&ctx, 0);
-    mbedtls_sha256_update_ret(&ctx, (const uint8_t *)commitmentInput.c_str(), commitmentInput.length());
-    mbedtls_sha256_finish_ret(&ctx, hash);
-    mbedtls_sha256_free(&ctx);
-
-    // Convert to hex string
-    char hexStr[65];
-    for (int i = 0; i < 32; i++)
-    {
-        sprintf(hexStr + (i * 2), "%02x", hash[i]);
-    }
-    hexStr[64] = '\0';
-    outCommitment = String(hexStr);
-
-    _logInfo.println("✅ Commitment created: " + outCommitment.substring(0, 16) + "...");
-    _logInfo.printf("   Timestamp saved: %llu\n", outTimestamp);
-    return true;
-}
-
-/**
- * @brief Verifies data against a previously created commitment
- *
- * Recomputes the commitment using revealed data and verifies it matches.
- * This proves the data was the original input without storing it on-chain.
- *
- * @param data Revealed data to verify
- * @param secret Secret key used in original commitment
- * @param nonce Nonce from original commitment
- * @param timestamp Timestamp from original commitment
- * @param originalCommitment Original commitment to verify against
- * @return true if data matches commitment
- */
-bool Infratic::verifyDataCommitment(
-    const String &data,
-    const String &secret,
-    const String &nonce,
-    uint64_t timestamp, // MUST be the exact timestamp from commitment
-    const String &originalCommitment)
-{
-    // Recreate with EXACT same timestamp
-    String commitmentInput = data + secret + nonce + String(timestamp);
-
-    uint8_t hash[32];
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts_ret(&ctx, 0);
-    mbedtls_sha256_update_ret(&ctx, (const uint8_t *)commitmentInput.c_str(), commitmentInput.length());
-    mbedtls_sha256_finish_ret(&ctx, hash);
-    mbedtls_sha256_free(&ctx);
-
-    char hexStr[65];
-    for (int i = 0; i < 32; i++)
-    {
-        sprintf(hexStr + (i * 2), "%02x", hash[i]);
-    }
-    hexStr[64] = '\0';
-
-    bool verified = (String(hexStr) == originalCommitment);
-
-    if (verified)
-    {
-        _logInfo.println("✅ Data verified against commitment");
-    }
-    else
-    {
-        _logErr.println("❌ Verification failed - data mismatch");
-        _logInfo.printf("   Expected: %s\n", originalCommitment.c_str());
-        _logInfo.printf("   Got:      %s\n", hexStr);
-    }
-
-    return verified;
-}
-
-/**
- * @brief Stores a ZK commitment on Solana blockchain
- *
- * Sends the commitment hash to blockchain using a memo program.
- * The actual data stays off-chain, only the commitment is public.
- *
- * @param privateKeyBase58 Transaction signer's private key
- * @param commitment Commitment hash to store
- * @param metadata Additional metadata (e.g., "sensor_id:ESP32_001")
- * @param outTxSignature Transaction signature
- * @return true if stored successfully
- */
-bool Infratic::storeCommitmentOnChain(
-    const String &privateKeyBase58,
-    const String &fromPubkeyBase58,
-    const String &commitment,
-    const String &metadata,
-    String &outTxSignature)
-{
-    const String MEMO_PROGRAM = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
-
-    String memoData = "ZK_COMMITMENT:" + commitment;
-    if (!metadata.isEmpty())
-    {
-        memoData += "|META:" + metadata;
-    }
-
-    bool result = sendProgramDataTransaction(
-        privateKeyBase58,
-        fromPubkeyBase58,
-        MEMO_PROGRAM,
-        memoData,
-        5000);
-
-    if (result)
-    {
-        _logInfo.println("✅ Commitment stored on-chain");
-    }
-    else
-    {
-        _logErr.println("❌ Failed to store commitment");
-    }
-
-    return result;
-}
-
-// ============================================================================
-// SECTION B: MERKLE TREE PROOFS (Multi-data verification)
-// ============================================================================
-
-/**
- * @brief Builds a Merkle tree from data list and returns root
- *
- * Creates a binary hash tree where each parent = SHA256(left_child || right_child).
- * Allows proving a single data point exists in a large dataset efficiently.
- *
- * @param dataList Vector of data strings to include in tree
- * @param outRoot Output Merkle root hash
- * @return true if successful
- */
-bool Infratic::buildMerkleTree(
-    const std::vector<String> &dataList,
-    String &outRoot)
-{
-    if (dataList.empty())
-    {
-        _logErr.println("❌ Empty data list");
-        return false;
-    }
-
-    std::vector<String> currentLevel;
-
-    // Hash all leaf nodes
-    for (const auto &data : dataList)
-    {
-        uint8_t hash[32];
-        mbedtls_sha256_context ctx;
-        mbedtls_sha256_init(&ctx);
-        mbedtls_sha256_starts_ret(&ctx, 0);
-        mbedtls_sha256_update_ret(&ctx, (const uint8_t *)data.c_str(), data.length());
-        mbedtls_sha256_finish_ret(&ctx, hash);
-        mbedtls_sha256_free(&ctx);
-
-        char hexStr[65];
-        for (int i = 0; i < 32; i++)
+        mbedtls_sha256_context c;
+        Sha()
         {
-            sprintf(hexStr + (i * 2), "%02x", hash[i]);
+            mbedtls_sha256_init(&c);
+            mbedtls_sha256_starts_ret(&c, 0);
         }
-        hexStr[64] = '\0';
-        currentLevel.push_back(String(hexStr));
-    }
-
-    // Build tree bottom-up
-    while (currentLevel.size() > 1)
-    {
-        std::vector<String> nextLevel;
-
-        for (size_t i = 0; i < currentLevel.size(); i += 2)
+        ~Sha() { mbedtls_sha256_free(&c); }
+        void add(const void *p, size_t n)
         {
-            String left = currentLevel[i];
-            String right = (i + 1 < currentLevel.size()) ? currentLevel[i + 1] : currentLevel[i];
-
-            String combined = left + right;
-
-            uint8_t hash[32];
-            mbedtls_sha256_context ctx;
-            mbedtls_sha256_init(&ctx);
-            mbedtls_sha256_starts_ret(&ctx, 0);
-            mbedtls_sha256_update_ret(&ctx, (const uint8_t *)combined.c_str(), combined.length());
-            mbedtls_sha256_finish_ret(&ctx, hash);
-            mbedtls_sha256_free(&ctx);
-
-            char hexStr[65];
-            for (int i = 0; i < 32; i++)
-            {
-                sprintf(hexStr + (i * 2), "%02x", hash[i]);
-            }
-            hexStr[64] = '\0';
-            nextLevel.push_back(String(hexStr));
+            if (n) mbedtls_sha256_update_ret(&c, (const uint8_t *)p, n);
         }
-
-        currentLevel = nextLevel;
-    }
-
-    outRoot = currentLevel[0];
-    _logInfo.println("✅ Merkle root: " + outRoot.substring(0, 16) + "...");
-    return true;
-}
-
-/**
- * @brief Generates a Merkle proof for a specific data item
- *
- * Creates the minimal proof path (sibling hashes) needed to verify
- * a data item is in the tree without revealing other data.
- *
- * @param dataList Complete data list
- * @param dataIndex Index of data to prove
- * @param outProof Output MerkleProof structure
- * @return true if successful
- */
-bool Infratic::createMerkleProof(
-    const std::vector<String> &dataList,
-    size_t dataIndex,
-    MerkleProof &outProof)
-{
-    if (dataIndex >= dataList.size())
-    {
-        _logErr.println("❌ Invalid data index");
-        return false;
-    }
-
-    std::vector<std::vector<String>> tree;
-    std::vector<String> currentLevel;
-
-    // Build first level (leaves)
-    for (const auto &data : dataList)
-    {
-        uint8_t hash[32];
-        mbedtls_sha256_context ctx;
-        mbedtls_sha256_init(&ctx);
-        mbedtls_sha256_starts_ret(&ctx, 0);
-        mbedtls_sha256_update_ret(&ctx, (const uint8_t *)data.c_str(), data.length());
-        mbedtls_sha256_finish_ret(&ctx, hash);
-        mbedtls_sha256_free(&ctx);
-
-        char hexStr[65];
-        for (int i = 0; i < 32; i++)
+        void addByte(uint8_t b) { add(&b, 1); }
+        void addU32(uint32_t v)
         {
-            sprintf(hexStr + (i * 2), "%02x", hash[i]);
+            uint8_t b[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
+            add(b, 4);
         }
-        hexStr[64] = '\0';
-        currentLevel.push_back(String(hexStr));
-    }
-    tree.push_back(currentLevel);
+        void finish(uint8_t out[32]) { mbedtls_sha256_finish_ret(&c, out); }
+    };
 
-    // Build tree and collect siblings
-    size_t currentIndex = dataIndex;
-    outProof.siblings.clear();
-
-    while (currentLevel.size() > 1)
+    void putU32(std::vector<uint8_t> &v, uint32_t x)
     {
-        std::vector<String> nextLevel;
+        for (int i = 0; i < 4; i++) v.push_back((uint8_t)(x >> (8 * i)));
+    }
+    void putU64(std::vector<uint8_t> &v, uint64_t x)
+    {
+        for (int i = 0; i < 8; i++) v.push_back((uint8_t)(x >> (8 * i)));
+    }
+    void putTag(std::vector<uint8_t> &v, const char *tag)
+    {
+        v.insert(v.end(), (const uint8_t *)tag, (const uint8_t *)tag + strlen(tag));
+    }
+    void putLP(std::vector<uint8_t> &v, const uint8_t *p, size_t n)
+    {
+        putU32(v, (uint32_t)n);
+        v.insert(v.end(), p, p + n);
+    }
 
-        for (size_t i = 0; i < currentLevel.size(); i += 2)
+    String zkHex(const uint8_t *p, size_t n)
+    {
+        static const char *d = "0123456789abcdef";
+        std::vector<char> buf(n * 2 + 1);
+        for (size_t i = 0; i < n; i++)
         {
-            String left = currentLevel[i];
-            String right = (i + 1 < currentLevel.size()) ? currentLevel[i + 1] : currentLevel[i];
-
-            // Collect sibling for proof path
-            if (i == (currentIndex & ~1))
-            {
-                if (currentIndex % 2 == 0 && i + 1 < currentLevel.size())
-                {
-                    outProof.siblings.push_back(right);
-                }
-                else if (currentIndex % 2 == 1)
-                {
-                    outProof.siblings.push_back(left);
-                }
-            }
-
-            String combined = left + right;
-            uint8_t hash[32];
-            mbedtls_sha256_context ctx;
-            mbedtls_sha256_init(&ctx);
-            mbedtls_sha256_starts_ret(&ctx, 0);
-            mbedtls_sha256_update_ret(&ctx, (const uint8_t *)combined.c_str(), combined.length());
-            mbedtls_sha256_finish_ret(&ctx, hash);
-            mbedtls_sha256_free(&ctx);
-
-            char hexStr[65];
-            for (int i = 0; i < 32; i++)
-            {
-                sprintf(hexStr + (i * 2), "%02x", hash[i]);
-            }
-            hexStr[64] = '\0';
-            nextLevel.push_back(String(hexStr));
+            buf[2 * i] = d[p[i] >> 4];
+            buf[2 * i + 1] = d[p[i] & 15];
         }
-
-        currentLevel = nextLevel;
-        currentIndex /= 2;
-        tree.push_back(currentLevel);
+        buf[n * 2] = 0;
+        return String(buf.data());
     }
 
-    outProof.root = currentLevel[0];
-    outProof.index = dataIndex;
-    outProof.isValid = true;
-
-    _logInfo.printf("✅ Merkle proof created for index %d\n", dataIndex);
-    _logInfo.printf("   Proof size: %d hashes\n", outProof.siblings.size());
-    return true;
-}
-
-/**
- * @brief Verifies a Merkle proof
- *
- * Reconstructs the path to root using the data and sibling hashes.
- * Proves the data was in the original tree without revealing other data.
- *
- * @param data Data to verify
- * @param proof Merkle proof structure
- * @return true if proof is valid
- */
-bool Infratic::verifyMerkleProof(
-    const String &data,
-    const MerkleProof &proof)
-{
-    // Hash the data
-    uint8_t hash[32];
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts_ret(&ctx, 0);
-    mbedtls_sha256_update_ret(&ctx, (const uint8_t *)data.c_str(), data.length());
-    mbedtls_sha256_finish_ret(&ctx, hash);
-    mbedtls_sha256_free(&ctx);
-
-    char currentHash[65];
-    for (int i = 0; i < 32; i++)
+    int hexVal(char c)
     {
-        sprintf(currentHash + (i * 2), "%02x", hash[i]);
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
     }
-    currentHash[64] = '\0';
 
-    size_t index = proof.index;
-
-    // Reconstruct path to root
-    for (const auto &sibling : proof.siblings)
+    // Strict: exactly 2*n hex chars, nothing else
+    bool zkUnhex(const String &s, uint8_t *out, size_t n)
     {
-        String combined;
-        if (index % 2 == 0)
+        if (s.length() != n * 2) return false;
+        const char *p = s.c_str();
+        for (size_t i = 0; i < n; i++)
         {
-            combined = String(currentHash) + sibling;
+            int hi = hexVal(p[2 * i]), lo = hexVal(p[2 * i + 1]);
+            if (hi < 0 || lo < 0) return false;
+            out[i] = (uint8_t)((hi << 4) | lo);
+        }
+        return true;
+    }
+
+    // Constant time comparison (no early exit)
+    bool ctEq(const uint8_t *a, const uint8_t *b, size_t n)
+    {
+        uint8_t diff = 0;
+        for (size_t i = 0; i < n; i++) diff |= (uint8_t)(a[i] ^ b[i]);
+        return diff == 0;
+    }
+
+    void zkRandom(uint8_t *out, size_t n)
+    {
+        for (size_t i = 0; i < n; i += 4)
+        {
+            uint32_t r = esp_random();
+            for (size_t j = 0; j < 4 && i + j < n; j++) out[i + j] = (uint8_t)(r >> (8 * j));
+        }
+    }
+
+    std::vector<uint8_t> bytesOf(const String &s)
+    {
+        return std::vector<uint8_t>((const uint8_t *)s.c_str(), (const uint8_t *)s.c_str() + s.length());
+    }
+
+    void commitHash(const uint8_t *data, size_t len, const uint8_t secret[32], uint8_t out[32])
+    {
+        Sha h;
+        h.add(ZK_TAG_COMMIT, strlen(ZK_TAG_COMMIT));
+        h.addU32((uint32_t)len);
+        h.add(data, len);
+        h.add(secret, 32);
+        h.finish(out);
+    }
+
+    // message committed by the deprecated createDataCommitment: lp(data) || lp(secret text) || u64le(timestamp)
+    std::vector<uint8_t> legacyCommitMessage(const String &data, const String &secret, uint64_t ts)
+    {
+        std::vector<uint8_t> m;
+        putLP(m, (const uint8_t *)data.c_str(), data.length());
+        putLP(m, (const uint8_t *)secret.c_str(), secret.length());
+        putU64(m, ts);
+        return m;
+    }
+
+    // ---- Merkle (RFC 6962 / 9162) ----
+    void leafHash(const String &d, uint8_t out[32])
+    {
+        Sha h;
+        h.addByte(0x00);
+        h.add(d.c_str(), d.length());
+        h.finish(out);
+    }
+    void nodeHash(const uint8_t *l, const uint8_t *r, uint8_t out[32])
+    {
+        Sha h;
+        h.addByte(0x01);
+        h.add(l, 32);
+        h.add(r, 32);
+        h.finish(out);
+    }
+    // largest power of two strictly smaller than n (n > 1)
+    size_t splitPoint(size_t n)
+    {
+        size_t k = 1;
+        while (k < n) k <<= 1;
+        return k >> 1;
+    }
+    // root of n leaf hashes stored back to back
+    void merkleHash(const uint8_t *leaves, size_t n, uint8_t out[32])
+    {
+        if (n == 1)
+        {
+            memcpy(out, leaves, 32);
+            return;
+        }
+        size_t k = splitPoint(n);
+        uint8_t l[32], r[32];
+        merkleHash(leaves, k, l);
+        merkleHash(leaves + 32 * k, n - k, r);
+        nodeHash(l, r, out);
+    }
+    // sibling hashes (leaf to root) for leaf m
+    void merklePath(const uint8_t *leaves, size_t n, size_t m, std::vector<uint8_t> &out)
+    {
+        if (n == 1) return;
+        size_t k = splitPoint(n);
+        uint8_t other[32];
+        if (m < k)
+        {
+            merklePath(leaves, k, m, out);
+            merkleHash(leaves + 32 * k, n - k, other);
         }
         else
         {
-            combined = sibling + String(currentHash);
+            merklePath(leaves + 32 * k, n - k, m - k, out);
+            merkleHash(leaves, k, other);
         }
-
-        mbedtls_sha256_init(&ctx);
-        mbedtls_sha256_starts_ret(&ctx, 0);
-        mbedtls_sha256_update_ret(&ctx, (const uint8_t *)combined.c_str(), combined.length());
-        mbedtls_sha256_finish_ret(&ctx, hash);
-        mbedtls_sha256_free(&ctx);
-
-        for (int i = 0; i < 32; i++)
+        out.insert(out.end(), other, other + 32);
+    }
+    bool hashLeaves(const std::vector<String> &list, std::vector<uint8_t> &out)
+    {
+        if (list.empty())
         {
-            sprintf(currentHash + (i * 2), "%02x", hash[i]);
+            _logErr.println("Merkle: empty data list");
+            return false;
         }
-        currentHash[64] = '\0';
-
-        index /= 2;
+        if (list.size() > ZK_MAX_LEAVES)
+        {
+            _logErr.println("Merkle: too many leaves (max 4096)");
+            return false;
+        }
+        out.resize(list.size() * 32);
+        for (size_t i = 0; i < list.size(); i++) leafHash(list[i], out.data() + 32 * i);
+        return true;
     }
 
-    bool verified = (String(currentHash) == proof.root);
-
-    if (verified)
+    // ---- statements that get signed ----
+    bool signStatement(const Keypair &device, const std::vector<uint8_t> &msg, String &outSigHex, String &outSigner)
     {
-        _logInfo.println("✅ Merkle proof verified");
-    }
-    else
-    {
-        _logErr.println("❌ Merkle proof verification failed");
+        if (device.privkey.size() < 64 || device.pubkey().data.size() != 32) return false;
+        uint8_t sig[64];
+        Ed25519::sign(sig, device.privkey.data(), device.privkey.data() + 32, msg.data(), msg.size());
+        // catches a keypair whose public half does not belong to its seed
+        if (!Ed25519::verify(sig, device.privkey.data() + 32, msg.data(), msg.size())) return false;
+        outSigHex = zkHex(sig, 64);
+        outSigner = base58Encode(device.privkey.data() + 32, 32);
+        return true;
     }
 
-    return verified;
+    bool verifyStatement(const std::vector<uint8_t> &msg, const String &sigHex, const String &signerB58,
+                         const String &expectedSignerB58)
+    {
+        uint8_t sig[64];
+        if (!zkUnhex(sigHex, sig, 64)) return false;
+        std::vector<uint8_t> signer = base58ToPubkey(signerB58);
+        std::vector<uint8_t> expected = base58ToPubkey(expectedSignerB58);
+        if (signer.size() != 32 || expected.size() != 32 || !ctEq(signer.data(), expected.data(), 32)) return false;
+        return Ed25519::verify(sig, expected.data(), msg.data(), msg.size());
+    }
+
+    std::vector<uint8_t> attestStatement(const String &context, const uint8_t commitment[32],
+                                         const std::vector<uint8_t> &publicData)
+    {
+        std::vector<uint8_t> m;
+        putTag(m, ZK_TAG_ATTEST);
+        putLP(m, (const uint8_t *)context.c_str(), context.length());
+        m.insert(m.end(), commitment, commitment + 32);
+        putLP(m, publicData.data(), publicData.size());
+        return m;
+    }
+
+    std::vector<uint8_t> timeStatement(const uint8_t hash[32], int64_t t, const String &blockhash)
+    {
+        std::vector<uint8_t> m;
+        putTag(m, ZK_TAG_TIME);
+        m.insert(m.end(), hash, hash + 32);
+        putU64(m, (uint64_t)t);
+        putLP(m, (const uint8_t *)blockhash.c_str(), blockhash.length());
+        return m;
+    }
+
+    std::vector<uint8_t> rangeStatement(const uint8_t commitment[32], int64_t lo, int64_t hi)
+    {
+        std::vector<uint8_t> m;
+        putTag(m, ZK_TAG_RANGE);
+        m.insert(m.end(), commitment, commitment + 32);
+        putU64(m, (uint64_t)lo);
+        putU64(m, (uint64_t)hi);
+        return m;
+    }
+
+    std::vector<uint8_t> i64Bytes(int64_t v)
+    {
+        std::vector<uint8_t> b;
+        putU64(b, (uint64_t)v);
+        return b;
+    }
+
+    // "ZK_COMMITMENT:<64 hex>[|META:<meta>]"; the hash has a fixed length so the layout is unambiguous
+    bool buildMemo(const String &hashHex, const String &metadata, String &memo)
+    {
+        uint8_t h[32];
+        if (!zkUnhex(hashHex, h, 32))
+        {
+            _logErr.println("ZK memo: commitment must be 64 hex chars");
+            return false;
+        }
+        if (metadata.length() > ZK_MAX_MEMO_META)
+        {
+            _logErr.println("ZK memo: metadata too long (max 400 bytes)");
+            return false;
+        }
+        for (unsigned i = 0; i < metadata.length(); i++)
+        {
+            if (metadata.c_str()[i] == 0)
+            {
+                _logErr.println("ZK memo: metadata contains a NUL byte");
+                return false;
+            }
+        }
+        memo = String("ZK_COMMITMENT:") + zkHex(h, 32);
+        if (!metadata.isEmpty()) memo += String("|META:") + metadata;
+        return true;
+    }
 }
 
 // ============================================================================
-// SECTION C: RANGE PROOFS (Prove value is in range without revealing it)
+// HASH COMMITMENTS
 // ============================================================================
 
-/**
- * @brief Creates a range proof showing value is between min and max
- *
- * Uses bit decomposition and commitments to prove a value is in range
- * without revealing the exact value. Useful for IoT sensors with privacy.
- *
- * @param value Secret value to prove
- * @param minValue Minimum allowed value
- * @param maxValue Maximum allowed value
- * @param secret Secret key for commitment
- * @param outProof Output RangeProof structure
- * @return true if successful
- */
-bool Infratic::createRangeProof(
-    int64_t value,
-    int64_t minValue,
-    int64_t maxValue,
-    const String &secret,
-    RangeProof &outProof)
+bool Infratic::commitDataWithSecret(const std::vector<uint8_t> &data, const std::vector<uint8_t> &secret,
+                                    std::vector<uint8_t> &outCommitment)
 {
-    if (value < minValue || value > maxValue)
+    if (secret.size() != 32 || data.size() > 0xFFFFFFF0u)
     {
-        _logErr.println("❌ Value out of range");
+        _logErr.println("commit: secret must be 32 bytes");
         return false;
     }
-
-    // Create commitment to value
-    String valueStr = String(value);
-    uint8_t nonceBytes[16];
-    for (int i = 0; i < 16; i++)
-    {
-        nonceBytes[i] = random(0, 256);
-    }
-    String nonce = base58Encode(nonceBytes, 16);
-
-    String commitmentInput = valueStr + secret + nonce;
-    uint8_t hash[32];
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts_ret(&ctx, 0);
-    mbedtls_sha256_update_ret(&ctx, (const uint8_t *)commitmentInput.c_str(), commitmentInput.length());
-    mbedtls_sha256_finish_ret(&ctx, hash);
-    mbedtls_sha256_free(&ctx);
-
-    char hexStr[65];
-    for (int i = 0; i < 32; i++)
-    {
-        sprintf(hexStr + (i * 2), "%02x", hash[i]);
-    }
-    hexStr[64] = '\0';
-
-    outProof.commitment = String(hexStr);
-    outProof.minValue = minValue;
-    outProof.maxValue = maxValue;
-
-    // Create proof data (simplified - in production use Bulletproofs)
-    String proofData = "RANGE_PROOF:";
-    proofData += "min=" + String(minValue) + ",";
-    proofData += "max=" + String(maxValue) + ",";
-    proofData += "commitment=" + String(hexStr).substring(0, 16) + "...,";
-    proofData += "nonce=" + nonce;
-
-    // Hash the proof
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts_ret(&ctx, 0);
-    mbedtls_sha256_update_ret(&ctx, (const uint8_t *)proofData.c_str(), proofData.length());
-    mbedtls_sha256_finish_ret(&ctx, hash);
-    mbedtls_sha256_free(&ctx);
-
-    for (int i = 0; i < 32; i++)
-    {
-        sprintf(hexStr + (i * 2), "%02x", hash[i]);
-    }
-    hexStr[64] = '\0';
-
-    outProof.proof = String(hexStr);
-    outProof.isValid = true;
-
-    _logInfo.println("✅ Range proof created");
-    _logInfo.printf("   Value in range [%lld, %lld]\n", minValue, maxValue);
-    _logInfo.println("   Commitment: " + outProof.commitment.substring(0, 16) + "...");
-
+    outCommitment.resize(32);
+    commitHash(data.data(), data.size(), secret.data(), outCommitment.data());
     return true;
 }
 
-/**
- * @brief Verifies a range proof
- *
- * @param value Revealed value to verify
- * @param secret Secret used in original commitment
- * @param proof Range proof to verify
- * @return true if value is in range and commitment matches
- */
-bool Infratic::verifyRangeProof(
-    int64_t value,
-    const String &secret,
-    const RangeProof &proof)
+bool Infratic::commitData(const std::vector<uint8_t> &data, std::vector<uint8_t> &outCommitment,
+                          std::vector<uint8_t> &outSecret)
 {
-    if (value < proof.minValue || value > proof.maxValue)
-    {
-        _logErr.println("❌ Value out of declared range");
-        return false;
-    }
+    outSecret.resize(32);
+    zkRandom(outSecret.data(), 32);
+    return commitDataWithSecret(data, outSecret, outCommitment);
+}
 
-    _logInfo.println("✅ Range proof verified");
-    _logInfo.printf("   Value %lld is in range [%lld, %lld]\n",
-                  value, proof.minValue, proof.maxValue);
+bool Infratic::verifyCommitment(const std::vector<uint8_t> &data, const std::vector<uint8_t> &secret,
+                                const std::vector<uint8_t> &commitment)
+{
+    if (commitment.size() != 32) return false;
+    std::vector<uint8_t> again;
+    if (!commitDataWithSecret(data, secret, again)) return false;
+    return ctEq(again.data(), commitment.data(), 32);
+}
 
+bool Infratic::commitString(const String &data, String &outCommitmentHex, String &outSecretHex)
+{
+    std::vector<uint8_t> c, s;
+    if (!commitData(bytesOf(data), c, s)) return false;
+    outCommitmentHex = zkHex(c.data(), 32);
+    outSecretHex = zkHex(s.data(), 32);
     return true;
 }
 
-// ============================================================================
-// SECTION D: LIGHTWEIGHT zkSNARK (Groth16-inspired)
-// ============================================================================
-
-/**
- * @brief Creates a zkSNARK proof (simplified Groth16-style)
- *
- * WARNING: This is a simplified implementation for ESP32.
- * For production, use proper zkSNARK libraries (circom/snarkjs).
- *
- * @param privateData Private data to prove knowledge of
- * @param publicInputs Public inputs visible to verifier
- * @param circuit Circuit description (what to prove)
- * @param outProof Output zkSNARK proof
- * @return true if successful
- */
-bool Infratic::createzkSNARKProof(
-    const std::vector<uint8_t> &privateData,
-    const std::vector<uint8_t> &publicInputs,
-    const String &circuit,
-    zkSNARKProof &outProof)
+bool Infratic::verifyCommitmentString(const String &data, const String &secretHex, const String &commitmentHex)
 {
-    _logErr.println("⚠️  zkSNARK: Simplified implementation for ESP32");
-    _logInfo.println("   For production, use circom + snarkjs");
-
-    // Simulate proof generation (real zkSNARK needs elliptic curve operations)
-    std::vector<uint8_t> proofData;
-
-    // Hash private data + public inputs + circuit
-    uint8_t hash[32];
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts_ret(&ctx, 0);
-    mbedtls_sha256_update_ret(&ctx, privateData.data(), privateData.size());
-    mbedtls_sha256_update_ret(&ctx, publicInputs.data(), publicInputs.size());
-    mbedtls_sha256_update_ret(&ctx, (const uint8_t *)circuit.c_str(), circuit.length());
-    mbedtls_sha256_finish_ret(&ctx, hash);
-    mbedtls_sha256_free(&ctx);
-
-    // Proof format: [hash(32 bytes)] + [signature placeholder(64 bytes)]
-    proofData.insert(proofData.end(), hash, hash + 32);
-
-    // Add placeholder signature (in real zkSNARK this would be elliptic curve points)
-    for (int i = 0; i < 64; i++)
-    {
-        proofData.push_back(random(0, 256));
-    }
-
-    outProof.proofData = proofData;
-    outProof.publicInputs = publicInputs;
-    outProof.isValid = true;
-
-    _logInfo.println("✅ zkSNARK proof generated");
-    _logInfo.printf("   Proof size: %d bytes\n", proofData.size());
-    _logInfo.printf("   Public inputs: %d bytes\n", publicInputs.size());
-
-    return true;
+    std::vector<uint8_t> s(32), c(32);
+    if (!zkUnhex(secretHex, s.data(), 32) || !zkUnhex(commitmentHex, c.data(), 32)) return false;
+    return verifyCommitment(bytesOf(data), s, c);
 }
 
-/**
- * @brief Verifies a zkSNARK proof
- *
- * @param proof zkSNARK proof to verify
- * @param expectedPublicInputs Expected public inputs
- * @return true if proof is valid
- */
-bool Infratic::verifyzkSNARKProof(
-    const zkSNARKProof &proof,
-    const std::vector<uint8_t> &expectedPublicInputs)
-{
-    if (proof.proofData.size() < 96)
-    {
-        _logErr.println("❌ Invalid proof size");
-        return false;
-    }
-
-    if (proof.publicInputs != expectedPublicInputs)
-    {
-        _logErr.println("❌ Public inputs mismatch");
-        return false;
-    }
-
-    // In real zkSNARK, verify pairing equation: e(A, B) = e(C, D)
-    // Here we just verify proof integrity
-
-    _logInfo.println("✅ zkSNARK proof verified");
-    return true;
-}
-
-// ============================================================================
-// SECTION E: TIMESTAMPED PROOFS (Prove data existed at specific time)
-// ============================================================================
-
-/**
- * @brief Creates a timestamped proof of data existence
- *
- * Combines data hash with blockchain timestamp to prove
- * the data existed at a specific point in time.
- *
- * @param data Data to timestamp
- * @param outProof Output proof string
- * @param outTimestamp Output timestamp
- * @param outBlockhash
- * @return true if successful
- */
-bool Infratic::createTimestampedProof(
-    const String &data,
-    String &outProof,
-    uint64_t &outTimestamp,
-    String &outBlockhash)
+bool Infratic::createDataCommitment(const String &data, const String &secret, String &outCommitment,
+                                    String &outNonce, uint64_t &outTimestamp)
 {
     outTimestamp = millis();
-
-    // Get latest blockhash as additional timestamp anchor
-    outBlockhash = getLatestBlockhash();
-    if (outBlockhash.isEmpty())
-    {
-        outBlockhash = "NO_BLOCKHASH"; // Store "NO_BLOCKHASH" consistently
-        _logErr.println("⚠️  Using local timestamp only");
-    }
-
-    String combined = data + String(outTimestamp) + outBlockhash;
-
-    uint8_t hash[32];
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts_ret(&ctx, 0);
-    mbedtls_sha256_update_ret(&ctx, (const uint8_t *)combined.c_str(), combined.length());
-    mbedtls_sha256_finish_ret(&ctx, hash);
-    mbedtls_sha256_free(&ctx);
-
-    char hexStr[65];
-    for (int i = 0; i < 32; i++)
-    {
-        sprintf(hexStr + (i * 2), "%02x", hash[i]);
-    }
-    hexStr[64] = '\0';
-
-    outProof = String(hexStr);
-
-    _logInfo.println("✅ Timestamped proof created");
-    _logInfo.printf("   Timestamp: %llu\n", outTimestamp);
-    _logInfo.println("   Blockhash: " + outBlockhash.substring(0, 16) + "...");
-    _logInfo.println("   Proof: " + outProof.substring(0, 16) + "...");
-
+    std::vector<uint8_t> c, s;
+    if (!commitData(legacyCommitMessage(data, secret, outTimestamp), c, s)) return false;
+    outCommitment = zkHex(c.data(), 32);
+    outNonce = zkHex(s.data(), 32);
     return true;
 }
 
-/**
- * @brief Verifies a timestamped proof
- *
- * @param data Original data
- * @param proof Proof hash
- * @param timestamp Claimed timestamp
- * @param blockhash Blockchain anchor (optional)
- * @return true if proof matches
- */
-bool Infratic::verifyTimestampedProof(
-    const String &data,
-    const String &proof,
-    uint64_t timestamp,
-    const String &blockhash // MUST be the exact blockhash from proof creation
-)
+bool Infratic::verifyDataCommitment(const String &data, const String &secret, const String &nonce,
+                                    uint64_t timestamp, const String &originalCommitment)
 {
-    String combined = data + String(timestamp) + blockhash;
-
-    uint8_t hash[32];
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts_ret(&ctx, 0);
-    mbedtls_sha256_update_ret(&ctx, (const uint8_t *)combined.c_str(), combined.length());
-    mbedtls_sha256_finish_ret(&ctx, hash);
-    mbedtls_sha256_free(&ctx);
-
-    char hexStr[65];
-    for (int i = 0; i < 32; i++)
-    {
-        sprintf(hexStr + (i * 2), "%02x", hash[i]);
-    }
-    hexStr[64] = '\0';
-
-    bool verified = (String(hexStr) == proof);
-
-    if (verified)
-    {
-        _logInfo.println("✅ Timestamped proof verified");
-        _logInfo.printf("   Timestamp: %llu\n", timestamp);
-        _logInfo.println("   Blockhash: " + blockhash.substring(0, 16) + "...");
-    }
-    else
-    {
-        _logErr.println("❌ Proof verification failed");
-        _logInfo.printf("   Expected: %s\n", proof.c_str());
-        _logInfo.printf("   Got:      %s\n", hexStr);
-    }
-
-    return verified;
+    std::vector<uint8_t> s(32), c(32);
+    if (!zkUnhex(nonce, s.data(), 32) || !zkUnhex(originalCommitment, c.data(), 32)) return false;
+    bool ok = verifyCommitment(legacyCommitMessage(data, secret, timestamp), s, c);
+    if (!ok) _logErr.println("Commitment does not match");
+    return ok;
 }
+
+bool Infratic::storeCommitmentOnChain(const String &privateKeyBase58, const String &fromPubkeyBase58,
+                                      const String &commitment, const String &metadata, String &outTxSignature)
+{
+    String memo;
+    if (!buildMemo(commitment, metadata, memo)) return false;
+
+    uint8_t privateKey[128];
+    size_t privLen = sizeof(privateKey);
+    if (!base58Decode(privateKeyBase58, privateKey, privLen) || privLen < 64)
+    {
+        _logErr.println("Private key decode error");
+        return false;
+    }
+    uint8_t fromPub[32];
+    size_t fromLen = sizeof(fromPub);
+    if (!base58Decode(fromPubkeyBase58, fromPub, fromLen) || fromLen != 32)
+    {
+        _logErr.println("Public key decode error");
+        return false;
+    }
+
+    String blockhash = getLatestBlockhash();
+    if (blockhash.isEmpty()) return false;
+
+    String txBase64;
+    if (!buildAndSignMemoTransaction(privateKey, privLen, fromPub, "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+                                     memo, blockhash, txBase64))
+    {
+        return false;
+    }
+    if (!sendRawTransaction(txBase64, outTxSignature)) return false;
+    if (!confirmTransaction(outTxSignature, 5000))
+    {
+        _logErr.println("Commitment transaction not confirmed in time");
+        return false;
+    }
+    _logInfo.println("Commitment stored on-chain: " + outTxSignature);
+    return true;
+}
+
 // ============================================================================
-// SECTION F: BATCH ZK OPERATIONS (Efficient multi-proof handling)
+// MERKLE TREES
 // ============================================================================
 
-/**
- * @brief Creates multiple commitments in batch
- *
- * @param dataList Vector of data strings
- * @param secret Shared secret for all commitments
- * @param outCommitments Output vector of commitments
- * @return true if successful
- */
-bool Infratic::createBatchCommitments(
-    const std::vector<String> &dataList,
-    const String &secret,
-    std::vector<ZKCommitment> &outCommitments)
+bool Infratic::buildMerkleTree(const std::vector<String> &dataList, String &outRoot)
+{
+    std::vector<uint8_t> leaves;
+    if (!hashLeaves(dataList, leaves)) return false;
+    uint8_t root[32];
+    merkleHash(leaves.data(), dataList.size(), root);
+    outRoot = zkHex(root, 32);
+    return true;
+}
+
+bool Infratic::createMerkleProof(const std::vector<String> &dataList, size_t dataIndex, MerkleProof &outProof)
+{
+    outProof.siblings.clear();
+    outProof.root = "";
+    outProof.index = 0;
+    outProof.leafCount = 0;
+    outProof.isValid = false;
+
+    if (dataIndex >= dataList.size())
+    {
+        _logErr.println("Merkle proof: index out of range");
+        return false;
+    }
+    std::vector<uint8_t> leaves;
+    if (!hashLeaves(dataList, leaves)) return false;
+
+    std::vector<uint8_t> path;
+    merklePath(leaves.data(), dataList.size(), dataIndex, path);
+    for (size_t i = 0; i < path.size(); i += 32) outProof.siblings.push_back(zkHex(path.data() + i, 32));
+
+    uint8_t root[32];
+    merkleHash(leaves.data(), dataList.size(), root);
+    outProof.root = zkHex(root, 32);
+    outProof.index = dataIndex;
+    outProof.leafCount = dataList.size();
+    outProof.isValid = true;
+    return true;
+}
+
+bool Infratic::verifyMerkleProof(const String &data, const MerkleProof &proof, const String &trustedRootHex)
+{
+    uint8_t root[32];
+    if (!zkUnhex(trustedRootHex, root, 32)) return false;
+    if (proof.leafCount == 0 || proof.index >= proof.leafCount || proof.siblings.size() > 64) return false;
+
+    uint8_t r[32];
+    leafHash(data, r);
+
+    // RFC 9162 section 2.1.3.2
+    size_t fn = proof.index, sn = proof.leafCount - 1;
+    for (size_t i = 0; i < proof.siblings.size(); i++)
+    {
+        uint8_t p[32];
+        if (!zkUnhex(proof.siblings[i], p, 32) || sn == 0) return false;
+        if ((fn & 1) || fn == sn)
+        {
+            nodeHash(p, r, r);
+            if (!(fn & 1))
+            {
+                do
+                {
+                    fn >>= 1;
+                    sn >>= 1;
+                } while (!(fn & 1) && fn != 0);
+            }
+        }
+        else
+        {
+            nodeHash(r, p, r);
+        }
+        fn >>= 1;
+        sn >>= 1;
+    }
+    return sn == 0 && ctEq(r, root, 32);
+}
+
+bool Infratic::verifyMerkleProof(const String &data, const MerkleProof &proof)
+{
+    return verifyMerkleProof(data, proof, proof.root);
+}
+
+// ============================================================================
+// SIGNED ATTESTATIONS
+// ============================================================================
+
+bool Infratic::createCommitmentAttestation(const Keypair &device, const String &commitmentHex, const String &context,
+                                           const std::vector<uint8_t> &publicData, CommitmentAttestation &out)
+{
+    uint8_t c[32];
+    if (!zkUnhex(commitmentHex, c, 32)) return false;
+    CommitmentAttestation a;
+    a.commitment = zkHex(c, 32);
+    a.context = context;
+    a.publicData = publicData;
+    if (!signStatement(device, attestStatement(context, c, publicData), a.signature, a.signer)) return false;
+    out = a;
+    return true;
+}
+
+bool Infratic::verifyCommitmentAttestation(const CommitmentAttestation &att, const String &expectedSignerBase58)
+{
+    uint8_t c[32];
+    if (!zkUnhex(att.commitment, c, 32)) return false;
+    return verifyStatement(attestStatement(att.context, c, att.publicData), att.signature, att.signer,
+                           expectedSignerBase58);
+}
+
+bool Infratic::signTimestamp(const Keypair &device, const std::vector<uint8_t> &data, int64_t unixTime,
+                             const String &blockhash, SignedTimestamp &out)
+{
+    uint8_t h[32];
+    {
+        Sha s;
+        s.add(data.data(), data.size());
+        s.finish(h);
+    }
+    SignedTimestamp t;
+    t.dataHash = zkHex(h, 32);
+    t.unixTime = unixTime;
+    t.blockhash = blockhash;
+    if (!signStatement(device, timeStatement(h, unixTime, blockhash), t.signature, t.signer)) return false;
+    out = t;
+    return true;
+}
+
+bool Infratic::createSignedTimestamp(const Keypair &device, const std::vector<uint8_t> &data, SignedTimestamp &out)
+{
+    int64_t now = 0;
+    if (!getClusterTime(now) || now <= 0)
+    {
+        _logErr.println("Signed timestamp: cluster time unavailable");
+        return false;
+    }
+    String blockhash = getLatestBlockhash(); // optional anchor, empty if the RPC cannot provide one
+    return signTimestamp(device, data, now, blockhash, out);
+}
+
+bool Infratic::verifySignedTimestamp(const SignedTimestamp &ts, const std::vector<uint8_t> &data,
+                                     const String &expectedSignerBase58)
+{
+    uint8_t claimed[32], h[32];
+    if (!zkUnhex(ts.dataHash, claimed, 32)) return false;
+    {
+        Sha s;
+        s.add(data.data(), data.size());
+        s.finish(h);
+    }
+    if (!ctEq(h, claimed, 32)) return false;
+    return verifyStatement(timeStatement(h, ts.unixTime, ts.blockhash), ts.signature, ts.signer, expectedSignerBase58);
+}
+
+bool Infratic::createRangeAttestation(const Keypair &device, int64_t value, int64_t minValue, int64_t maxValue,
+                                      RangeAttestation &out, std::vector<uint8_t> &outSecret)
+{
+    if (minValue > maxValue || value < minValue || value > maxValue)
+    {
+        _logErr.println("Range attestation: value outside the range");
+        return false;
+    }
+    std::vector<uint8_t> c, s;
+    if (!commitData(i64Bytes(value), c, s)) return false;
+    RangeAttestation a;
+    a.commitment = zkHex(c.data(), 32);
+    a.minValue = minValue;
+    a.maxValue = maxValue;
+    if (!signStatement(device, rangeStatement(c.data(), minValue, maxValue), a.signature, a.signer)) return false;
+    out = a;
+    outSecret = s;
+    return true;
+}
+
+bool Infratic::verifyRangeAttestation(const RangeAttestation &att, const String &expectedSignerBase58)
+{
+    uint8_t c[32];
+    if (!zkUnhex(att.commitment, c, 32)) return false;
+    return verifyStatement(rangeStatement(c, att.minValue, att.maxValue), att.signature, att.signer,
+                           expectedSignerBase58);
+}
+
+bool Infratic::openRangeAttestation(const RangeAttestation &att, int64_t value, const std::vector<uint8_t> &secret,
+                                    const String &expectedSignerBase58)
+{
+    if (value < att.minValue || value > att.maxValue) return false;
+    if (!verifyRangeAttestation(att, expectedSignerBase58)) return false;
+    std::vector<uint8_t> c(32);
+    if (!zkUnhex(att.commitment, c.data(), 32)) return false;
+    return verifyCommitment(i64Bytes(value), secret, c);
+}
+
+// ============================================================================
+// DEPRECATED NAMES THAT CANNOT BE IMPLEMENTED HONESTLY
+// ============================================================================
+
+bool Infratic::createzkSNARKProof(const std::vector<uint8_t> &, const std::vector<uint8_t> &, const String &,
+                                  zkSNARKProof &outProof)
+{
+    outProof.proofData.clear();
+    outProof.publicInputs.clear();
+    outProof.isValid = false;
+    _logErr.println("createzkSNARKProof: there is no zkSNARK prover on the device. Use createCommitmentAttestation.");
+    return false;
+}
+
+bool Infratic::verifyzkSNARKProof(const zkSNARKProof &, const std::vector<uint8_t> &)
+{
+    _logErr.println("verifyzkSNARKProof: there is no zkSNARK verifier. Use verifyCommitmentAttestation.");
+    return false;
+}
+
+bool Infratic::createRangeProof(int64_t, int64_t, int64_t, const String &, RangeProof &outProof)
+{
+    outProof.isValid = false;
+    _logErr.println("createRangeProof: not a range proof. Use createRangeAttestation (signed claim).");
+    return false;
+}
+
+bool Infratic::verifyRangeProof(int64_t, const String &, const RangeProof &)
+{
+    _logErr.println("verifyRangeProof: not a range proof. Use verifyRangeAttestation/openRangeAttestation.");
+    return false;
+}
+
+namespace
+{
+    void legacyTimeHash(const String &data, uint64_t ts, const String &blockhash, uint8_t out[32])
+    {
+        Sha h;
+        h.add(ZK_TAG_LEGACY_TIME, strlen(ZK_TAG_LEGACY_TIME));
+        h.addU32(data.length());
+        h.add(data.c_str(), data.length());
+        std::vector<uint8_t> t;
+        putU64(t, ts);
+        h.add(t.data(), 8);
+        h.addU32(blockhash.length());
+        h.add(blockhash.c_str(), blockhash.length());
+        h.finish(out);
+    }
+}
+
+bool Infratic::createTimestampedProof(const String &data, String &outProof, uint64_t &outTimestamp,
+                                      String &outBlockhash)
+{
+    int64_t now = 0;
+    if (!getClusterTime(now) || now <= 0)
+    {
+        _logErr.println("Timestamped proof: cluster time unavailable");
+        return false;
+    }
+    outTimestamp = (uint64_t)now;
+    outBlockhash = getLatestBlockhash();
+    if (outBlockhash.isEmpty()) outBlockhash = "NO_BLOCKHASH";
+    uint8_t h[32];
+    legacyTimeHash(data, outTimestamp, outBlockhash, h);
+    outProof = zkHex(h, 32);
+    return true;
+}
+
+bool Infratic::verifyTimestampedProof(const String &data, const String &proof, uint64_t timestamp,
+                                      const String &blockhash)
+{
+    uint8_t claimed[32], h[32];
+    if (!zkUnhex(proof, claimed, 32)) return false;
+    legacyTimeHash(data, timestamp, blockhash, h);
+    return ctEq(h, claimed, 32);
+}
+
+// ============================================================================
+// BATCHES
+// ============================================================================
+
+bool Infratic::createBatchCommitments(const std::vector<String> &dataList, const String &,
+                                      std::vector<ZKCommitment> &outCommitments)
 {
     outCommitments.clear();
-
-    for (const auto &data : dataList)
+    for (size_t i = 0; i < dataList.size(); i++)
     {
-        ZKCommitment commit;
-        String nonce;
-
-        uint64_t tempTimestamp;
-        if (createDataCommitment(data, secret, commit.commitment, nonce, tempTimestamp))
+        ZKCommitment z;
+        if (!commitString(dataList[i], z.commitment, z.nonce))
         {
-            commit.nonce = nonce;
-            commit.timestamp = millis();
-            commit.metadata = "batch_commit";
-            outCommitments.push_back(commit);
+            outCommitments.clear();
+            return false;
         }
+        z.timestamp = millis();
+        z.metadata = "batch_commit";
+        outCommitments.push_back(z);
     }
-
-    _logInfo.printf("✅ Created %d batch commitments\n", outCommitments.size());
+    _logInfo.printf("Created %u batch commitments\n", (unsigned)outCommitments.size());
     return !outCommitments.empty();
 }
 
-/**
- * @brief Stores batch commitments on-chain efficiently
- *
- * Combines multiple commitments into a single Merkle root
- * to save transaction costs.
- *
- * @param privateKeyBase58 Signer's private key
- * @param commitments Vector of commitments
- * @param outTxSignature Transaction signature
- * @return true if successful
- */
-bool Infratic::storeBatchCommitmentsOnChain(
-    const String &privateKeyBase58,
-    const String &fromPubkeyBase58,
-    const std::vector<ZKCommitment> &commitments,
-    String &outTxSignature)
+bool Infratic::storeBatchCommitmentsOnChain(const String &privateKeyBase58, const String &fromPubkeyBase58,
+                                            const std::vector<ZKCommitment> &commitments, String &outTxSignature)
 {
-    // Build Merkle tree of commitments
-    std::vector<String> commitmentHashes;
-    for (const auto &commit : commitments)
-    {
-        commitmentHashes.push_back(commit.commitment);
-    }
-
-    String merkleRoot;
-    if (!buildMerkleTree(commitmentHashes, merkleRoot))
-    {
-        return false;
-    }
-
-    // Store only the Merkle root on-chain
-    String metadata = "batch_size:" + String(commitments.size());
-    return storeCommitmentOnChain(
-        privateKeyBase58,
-        fromPubkeyBase58,
-        merkleRoot,
-        metadata,
-        outTxSignature);
+    std::vector<String> leaves;
+    for (size_t i = 0; i < commitments.size(); i++) leaves.push_back(commitments[i].commitment);
+    String root;
+    if (!buildMerkleTree(leaves, root)) return false;
+    return storeCommitmentOnChain(privateKeyBase58, fromPubkeyBase58, root,
+                                  "batch_size:" + String((unsigned long)commitments.size()), outTxSignature);
 }
 
 // ============================================================================
 // ANCHOR PROGRAM STORAGE OPERATIONS
 // ============================================================================
 
-bool Infratic::initializeZKStorage(
-    const String &privateKeyBase58,
-    const String &authorityPubkey,
-    const String &programId,
-    const String &seedName,
-    String &outPDA,
-    String &outTxSignature)
+namespace
 {
-    _logInfo.println("\n=== Initialize ZK Storage in Anchor ===");
-
-    // 1. Decode private key
-    uint8_t privateKey[128];
-    size_t privLen = sizeof(privateKey);
-    if (!base58Decode(privateKeyBase58, privateKey, privLen) || privLen < 64)
+    struct AnchorCall
     {
-        _logErr.println("❌ Private key decode failed");
-        return false;
-    }
-
-    // 2. Derive PDA
-    std::vector<uint8_t> authorityBytes = base58ToPubkey(authorityPubkey);
-    if (authorityBytes.size() != 32) {
-        _logErr.println("❌ Authority pubkey decode failed");
-        return false;
-    }
-
-    std::vector<std::vector<uint8_t>> seeds = {
-        std::vector<uint8_t>(seedName.begin(), seedName.end()),
-        authorityBytes
+        Keypair signer;
+        Pubkey authority;
+        Pubkey program;
+        Pubkey pda;
+        String pdaStr;
+        uint8_t bump;
     };
 
-    uint8_t bump;
-    if (!derivePDA(seeds, programId, outPDA, bump))
+    // Decodes keys, checks that the secret key belongs to `authorityPubkey` and derives the PDA
+    // from seedsWithoutAuthority + authority.
+    bool anchorPrepare(Infratic &sol, const String &privateKeyBase58, const String &authorityPubkey,
+                       const String &programId, const std::vector<std::vector<uint8_t>> &seedsWithoutAuthority,
+                       AnchorCall &c)
     {
-        _logErr.println("❌ PDA derivation failed");
-        return false;
-    }
-
-    _logInfo.println("✅ PDA derived: " + outPDA);
-    _logInfo.printf("   Bump: %d\n", bump);
-
-    // 3. CHECK IF ACCOUNT ALREADY EXISTS
-    _logInfo.println("\n📋 Checking if account already exists...");
-    
-    uint64_t accountBalance = 0;
-    if (getSolBalance(outPDA, accountBalance)) {
-        // Account exists
-        if (accountBalance > 0) {
-            _logErr.println("⚠️  Account already initialized");
-            _logInfo.printf("   Balance: %llu lamports\n", accountBalance);
-            _logInfo.println("✅ Skipping initialization (account found)\n");
-            outTxSignature = "EXISTING_ACCOUNT";
-            return true;  // ← Return success, account already exists
+        uint8_t privateKey[128];
+        size_t privLen = sizeof(privateKey);
+        if (!base58Decode(privateKeyBase58, privateKey, privLen) || privLen < 64)
+        {
+            _logErr.println("Anchor: private key decode failed");
+            return false;
         }
+        c.signer = Keypair::fromPrivateKey(privateKey);
+        c.authority = Pubkey::fromBase58(authorityPubkey);
+        c.program = Pubkey::fromBase58(programId);
+        if (c.authority.data.size() != 32 || c.program.data.size() != 32)
+        {
+            _logErr.println("Anchor: invalid authority or program id");
+            return false;
+        }
+        if (c.signer.pubkey().data != c.authority.data)
+        {
+            _logErr.println("Anchor: private key does not belong to the authority pubkey");
+            return false;
+        }
+        std::vector<std::vector<uint8_t>> seeds = seedsWithoutAuthority;
+        seeds.push_back(c.authority.data);
+        if (!sol.derivePDA(seeds, programId, c.pdaStr, c.bump)) return false;
+        c.pda = Pubkey::fromBase58(c.pdaStr);
+        return true;
     }
 
-    // 4. Account doesn't exist, create it
-    _logInfo.println("📝 Account not found, creating new one...\n");
-
-    Keypair signer = Keypair::fromPrivateKey(privateKey);
-    Pubkey authority = Pubkey::fromBase58(authorityPubkey);
-    Pubkey pda = Pubkey::fromBase58(outPDA);
-    Pubkey program = Pubkey::fromBase58(programId);
-    Pubkey systemProgram = Pubkey::fromBase58("11111111111111111111111111111111");
-
-    // Discriminator for "initialize_storage"
-    std::vector<uint8_t> discriminator = calculateDiscriminator("initialize_storage");
-    std::vector<uint8_t> instructionData = discriminator;
-
-    // Add seed_name (String format: length + bytes)
-    uint32_t seedLen = seedName.length();
-    instructionData.push_back(seedLen & 0xFF);
-    instructionData.push_back((seedLen >> 8) & 0xFF);
-    instructionData.push_back((seedLen >> 16) & 0xFF);
-    instructionData.push_back((seedLen >> 24) & 0xFF);
-    instructionData.insert(instructionData.end(), seedName.begin(), seedName.end());
-
-    // 4. Create instruction
-    Instruction ix(
-        program,
-        {AccountMeta::writable(pda, false),
-         AccountMeta::writable(authority, true),
-         AccountMeta{systemProgram, false, false}},
-        instructionData);
-
-    // 5. Send transaction
-    String blockhash = getLatestBlockhash();
-    if (blockhash.isEmpty())
-        return false;
-
-    Transaction tx;
-    tx.fee_payer = authority;
-    tx.recent_blockhash = blockhash;
-    tx.add(ix);
-    applyPriorityFee(tx);
-    tx.sign({signer});
-
-    String txBase64 = tx.serializeBase64();
-    if (!sendRawTransaction(txBase64, outTxSignature))
+    bool anchorSend(Infratic &sol, AnchorCall &c, const std::vector<AccountMeta> &accounts,
+                    const std::vector<uint8_t> &data, String &outSig)
     {
-        _logErr.println("❌ Transaction failed");
-        return false;
+        String blockhash = sol.getLatestBlockhash();
+        if (blockhash.isEmpty()) return false;
+
+        Transaction tx;
+        tx.fee_payer = c.authority;
+        tx.recent_blockhash = blockhash;
+        tx.add(Instruction(c.program, accounts, data));
+        sol.applyPriorityFee(tx);
+        if (!tx.sign({c.signer}))
+        {
+            _logErr.println("Anchor: signing failed");
+            return false;
+        }
+        String b64 = tx.serializeBase64();
+        std::vector<uint8_t> raw;
+        if (b64.isEmpty() || !fromBase64(b64.c_str(), raw) || raw.size() > ZK_MAX_TX_BYTES)
+        {
+            _logErr.println("Anchor: transaction empty or larger than 1232 bytes (shorten the metadata)");
+            return false;
+        }
+        if (!sol.sendRawTransaction(b64, outSig)) return false;
+        return sol.confirmTransaction(outSig, 5000);
     }
 
-    _logInfo.println("✅ Storage initialized: " + outTxSignature);
-    return confirmTransaction(outTxSignature, 5000);
+    bool hash32(const String &hex, BorshWriter &w)
+    {
+        uint8_t h[32];
+        if (!zkUnhex(hex, h, 32))
+        {
+            _logErr.println("Anchor: hash must be 64 hex chars");
+            return false;
+        }
+        w.bytes(std::vector<uint8_t>(h, h + 32));
+        return true;
+    }
+
+    std::vector<uint8_t> seedBytes(const String &s)
+    {
+        return bytesOf(s);
+    }
 }
 
-bool Infratic::storeCommitmentInAnchor(
-    const String &privateKeyBase58,
-    const String &authorityPubkey,
-    const String &programId,
-    const String &seedName,
-    const String &commitment,
-    const String &metadata,
-    String &outTxSignature)
+bool Infratic::initializeZKStorage(const String &privateKeyBase58, const String &authorityPubkey,
+                                   const String &programId, const String &seedName, String &outPDA,
+                                   String &outTxSignature)
 {
-    _logInfo.println("\n=== Store Commitment in Anchor ===");
+    AnchorCall c;
+    if (!anchorPrepare(*this, privateKeyBase58, authorityPubkey, programId, {seedBytes(seedName)}, c)) return false;
+    outPDA = c.pdaStr;
 
-    // Decode private key
-    uint8_t privateKey[128];
-    size_t privLen = sizeof(privateKey);
-    if (!base58Decode(privateKeyBase58, privateKey, privLen) || privLen < 64)
+    uint64_t balance = 0;
+    if (getSolBalance(outPDA, balance) && balance > 0)
     {
-        return false;
+        _logInfo.println("ZK storage already initialized: " + outPDA);
+        outTxSignature = "EXISTING_ACCOUNT";
+        return true;
     }
 
-    // Derive PDA
-    std::vector<std::vector<uint8_t>> seeds = {
-        std::vector<uint8_t>(seedName.begin(), seedName.end()),
-        base58ToPubkey(authorityPubkey)};
-
-    String pdaAddress;
-    uint8_t bump;
-    if (!derivePDA(seeds, programId, pdaAddress, bump))
-    {
-        return false;
-    }
-
-    // Build instruction
-    Keypair signer = Keypair::fromPrivateKey(privateKey);
-    Pubkey authority = Pubkey::fromBase58(authorityPubkey);
-    Pubkey pda = Pubkey::fromBase58(pdaAddress);
-    Pubkey program = Pubkey::fromBase58(programId);
-
-    std::vector<uint8_t> discriminator = calculateDiscriminator("store_commitment");
-    std::vector<uint8_t> instructionData = discriminator;
-
-    // Add commitment (32 bytes)
-    std::vector<uint8_t> commitmentBytes;
-    for (size_t i = 0; i < commitment.length() && i < 64; i += 2)
-    {
-        String byteStr = commitment.substring(i, i + 2);
-        commitmentBytes.push_back(strtol(byteStr.c_str(), nullptr, 16));
-    }
-    instructionData.insert(instructionData.end(), commitmentBytes.begin(), commitmentBytes.end());
-
-    // Add metadata (String)
-    uint32_t metaLen = metadata.length();
-    instructionData.push_back(metaLen & 0xFF);
-    instructionData.push_back((metaLen >> 8) & 0xFF);
-    instructionData.push_back((metaLen >> 16) & 0xFF);
-    instructionData.push_back((metaLen >> 24) & 0xFF);
-    instructionData.insert(instructionData.end(), metadata.begin(), metadata.end());
-
-    // Add timestamp
-    uint64_t timestamp = millis();
-    std::vector<uint8_t> timestampBytes = encodeU64LE(timestamp);
-    instructionData.insert(instructionData.end(), timestampBytes.begin(), timestampBytes.end());
-
-    Instruction ix(
-        program,
-        {AccountMeta::writable(pda, false),
-         AccountMeta::signer(authority)},
-        instructionData);
-
-    String blockhash = getLatestBlockhash();
-    if (blockhash.isEmpty())
-        return false;
-
-    Transaction tx;
-    tx.fee_payer = authority;
-    tx.recent_blockhash = blockhash;
-    tx.add(ix);
-    applyPriorityFee(tx);
-    tx.sign({signer});
-
-    String txBase64 = tx.serializeBase64();
-    if (!sendRawTransaction(txBase64, outTxSignature))
-    {
-        return false;
-    }
-
-    _logInfo.println("✅ Commitment stored in Anchor: " + outTxSignature);
-    return confirmTransaction(outTxSignature, 5000);
-}
-bool Infratic::updateCommitmentInAnchor(
-    const String &privateKeyBase58,
-    const String &authorityPubkey,
-    const String &programId,
-    const String &seedName,
-    const String &newCommitment,
-    const String &metadata,
-    String &outTxSignature)
-{
-    // Similar to storeCommitmentInAnchor but uses "update_commitment" discriminator
-    _logInfo.println("\n=== Update Commitment in Anchor ===");
-
-    uint8_t privateKey[128];
-    size_t privLen = sizeof(privateKey);
-    if (!base58Decode(privateKeyBase58, privateKey, privLen) || privLen < 64)
-    {
-        return false;
-    }
-
-    std::vector<std::vector<uint8_t>> seeds = {
-        std::vector<uint8_t>(seedName.begin(), seedName.end()),
-        base58ToPubkey(authorityPubkey)};
-
-    String pdaAddress;
-    uint8_t bump;
-    if (!derivePDA(seeds, programId, pdaAddress, bump))
-    {
-        return false;
-    }
-
-    Keypair signer = Keypair::fromPrivateKey(privateKey);
-    Pubkey authority = Pubkey::fromBase58(authorityPubkey);
-    Pubkey pda = Pubkey::fromBase58(pdaAddress);
-    Pubkey program = Pubkey::fromBase58(programId);
-
-    std::vector<uint8_t> discriminator = calculateDiscriminator("update_commitment");
-    std::vector<uint8_t> instructionData = discriminator;
-
-    // Add new commitment
-    std::vector<uint8_t> commitmentBytes;
-    for (size_t i = 0; i < newCommitment.length() && i < 64; i += 2)
-    {
-        String byteStr = newCommitment.substring(i, i + 2);
-        commitmentBytes.push_back(strtol(byteStr.c_str(), nullptr, 16));
-    }
-    instructionData.insert(instructionData.end(), commitmentBytes.begin(), commitmentBytes.end());
-
-    // Add metadata
-    uint32_t metaLen = metadata.length();
-    instructionData.push_back(metaLen & 0xFF);
-    instructionData.push_back((metaLen >> 8) & 0xFF);
-    instructionData.push_back((metaLen >> 16) & 0xFF);
-    instructionData.push_back((metaLen >> 24) & 0xFF);
-    instructionData.insert(instructionData.end(), metadata.begin(), metadata.end());
-
-    // Add timestamp
-    uint64_t timestamp = millis();
-    std::vector<uint8_t> timestampBytes = encodeU64LE(timestamp);
-    instructionData.insert(instructionData.end(), timestampBytes.begin(), timestampBytes.end());
-
-    Instruction ix(
-        program,
-        {AccountMeta::writable(pda, false),
-         AccountMeta::signer(authority)},
-        instructionData);
-
-    String blockhash = getLatestBlockhash();
-    if (blockhash.isEmpty())
-        return false;
-
-    Transaction tx;
-    tx.fee_payer = authority;
-    tx.recent_blockhash = blockhash;
-    tx.add(ix);
-    applyPriorityFee(tx);
-    tx.sign({signer});
-
-    String txBase64 = tx.serializeBase64();
-    if (!sendRawTransaction(txBase64, outTxSignature))
-    {
-        return false;
-    }
-
-    _logInfo.println("✅ Commitment updated: " + outTxSignature);
-    return confirmTransaction(outTxSignature, 5000);
+    BorshWriter w;
+    w.bytes(calculateDiscriminator("initialize_storage")).str(seedName);
+    return anchorSend(*this, c,
+                      {AccountMeta::writable(c.pda, false), AccountMeta::writable(c.authority, true),
+                       AccountMeta{Pubkey::fromBase58(INFRATIC_SYSTEM_PROGRAM_ID), false, false}},
+                      w.data, outTxSignature);
 }
 
-bool Infratic::storeMerkleRootInAnchor(
-    const String &privateKeyBase58,
-    const String &authorityPubkey,
-    const String &programId,
-    const String &seedName,
-    const String &merkleRoot,
-    uint32_t leafCount,
-    const String &metadata,
-    String &outTxSignature)
+static bool anchorCommitmentCall(Infratic &sol, const char *ixName, const String &privateKeyBase58,
+                                 const String &authorityPubkey, const String &programId, const String &seedName,
+                                 const String &commitment, const String &metadata, String &outTxSignature)
 {
-    _logInfo.println("\n=== Store Merkle Root in Anchor ===");
-
-    uint8_t privateKey[128];
-    size_t privLen = sizeof(privateKey);
-    if (!base58Decode(privateKeyBase58, privateKey, privLen) || privLen < 64)
+    AnchorCall c;
+    if (!anchorPrepare(sol, privateKeyBase58, authorityPubkey, programId, {seedBytes(seedName)}, c)) return false;
+    BorshWriter w;
+    w.bytes(sol.calculateDiscriminator(ixName));
+    if (!hash32(commitment, w)) return false;
+    int64_t now = 0;
+    if (!sol.getClusterTime(now) || now <= 0)
     {
+        _logErr.println("Anchor: cluster time unavailable");
         return false;
     }
-
-    std::vector<std::vector<uint8_t>> seeds = {
-        std::vector<uint8_t>(seedName.begin(), seedName.end()),
-        base58ToPubkey(authorityPubkey)};
-
-    String pdaAddress;
-    uint8_t bump;
-    if (!derivePDA(seeds, programId, pdaAddress, bump))
-    {
-        return false;
-    }
-
-    Keypair signer = Keypair::fromPrivateKey(privateKey);
-    Pubkey authority = Pubkey::fromBase58(authorityPubkey);
-    Pubkey pda = Pubkey::fromBase58(pdaAddress);
-    Pubkey program = Pubkey::fromBase58(programId);
-
-    std::vector<uint8_t> discriminator = calculateDiscriminator("store_merkle_root");
-    std::vector<uint8_t> instructionData = discriminator;
-
-    // Add merkle_root (32 bytes)
-    std::vector<uint8_t> rootBytes;
-    for (size_t i = 0; i < merkleRoot.length() && i < 64; i += 2)
-    {
-        String byteStr = merkleRoot.substring(i, i + 2);
-        rootBytes.push_back(strtol(byteStr.c_str(), nullptr, 16));
-    }
-    instructionData.insert(instructionData.end(), rootBytes.begin(), rootBytes.end());
-
-    // Add leaf_count (u32, little-endian)
-    instructionData.push_back(leafCount & 0xFF);
-    instructionData.push_back((leafCount >> 8) & 0xFF);
-    instructionData.push_back((leafCount >> 16) & 0xFF);
-    instructionData.push_back((leafCount >> 24) & 0xFF);
-
-    // Add metadata (String: u32 length + bytes)
-    uint32_t metaLen = metadata.length();
-    instructionData.push_back(metaLen & 0xFF);
-    instructionData.push_back((metaLen >> 8) & 0xFF);
-    instructionData.push_back((metaLen >> 16) & 0xFF);
-    instructionData.push_back((metaLen >> 24) & 0xFF);
-    instructionData.insert(instructionData.end(), metadata.begin(), metadata.end());
-
-    Instruction ix(
-        program,
-        {AccountMeta::writable(pda, false),
-         AccountMeta::signer(authority)},
-        instructionData);
-
-    String blockhash = getLatestBlockhash();
-    if (blockhash.isEmpty())
-        return false;
-
-    Transaction tx;
-    tx.fee_payer = authority;
-    tx.recent_blockhash = blockhash;
-    tx.add(ix);
-    applyPriorityFee(tx);
-    tx.sign({signer});
-
-    String txBase64 = tx.serializeBase64();
-    if (!sendRawTransaction(txBase64, outTxSignature))
-    {
-        return false;
-    }
-
-    _logInfo.println("✅ Merkle root stored: " + outTxSignature);
-    return confirmTransaction(outTxSignature, 5000);
+    w.str(metadata).u64((uint64_t)now);
+    return anchorSend(sol, c, {AccountMeta::writable(c.pda, false), AccountMeta::signer(c.authority)}, w.data,
+                      outTxSignature);
 }
 
-bool Infratic::storeBatchInAnchor(
-    const String &privateKeyBase58,
-    const String &authorityPubkey,
-    const String &programId,
-    const String &batchId,
-    const String &batchRoot,
-    uint32_t batchSize,
-    const String &metadata,
-    String &outTxSignature)
+bool Infratic::storeCommitmentInAnchor(const String &privateKeyBase58, const String &authorityPubkey,
+                                       const String &programId, const String &seedName, const String &commitment,
+                                       const String &metadata, String &outTxSignature)
 {
-    _logInfo.println("\n=== Store Batch in Anchor ===");
+    return anchorCommitmentCall(*this, "store_commitment", privateKeyBase58, authorityPubkey, programId, seedName,
+                                commitment, metadata, outTxSignature);
+}
 
-    uint8_t privateKey[128];
-    size_t privLen = sizeof(privateKey);
-    if (!base58Decode(privateKeyBase58, privateKey, privLen) || privLen < 64)
-    {
+bool Infratic::updateCommitmentInAnchor(const String &privateKeyBase58, const String &authorityPubkey,
+                                        const String &programId, const String &seedName,
+                                        const String &newCommitment, const String &metadata, String &outTxSignature)
+{
+    return anchorCommitmentCall(*this, "update_commitment", privateKeyBase58, authorityPubkey, programId, seedName,
+                                newCommitment, metadata, outTxSignature);
+}
+
+bool Infratic::storeMerkleRootInAnchor(const String &privateKeyBase58, const String &authorityPubkey,
+                                       const String &programId, const String &seedName, const String &merkleRoot,
+                                       uint32_t leafCount, const String &metadata, String &outTxSignature)
+{
+    AnchorCall c;
+    if (!anchorPrepare(*this, privateKeyBase58, authorityPubkey, programId, {seedBytes(seedName)}, c)) return false;
+    BorshWriter w;
+    w.bytes(calculateDiscriminator("store_merkle_root"));
+    if (!hash32(merkleRoot, w)) return false;
+    w.u32(leafCount).str(metadata);
+    return anchorSend(*this, c, {AccountMeta::writable(c.pda, false), AccountMeta::signer(c.authority)}, w.data,
+                      outTxSignature);
+}
+
+bool Infratic::storeBatchInAnchor(const String &privateKeyBase58, const String &authorityPubkey,
+                                  const String &programId, const String &batchId, const String &batchRoot,
+                                  uint32_t batchSize, const String &metadata, String &outTxSignature)
+{
+    AnchorCall c;
+    std::vector<uint8_t> tag((const uint8_t *)"batch", (const uint8_t *)"batch" + 5);
+    if (!anchorPrepare(*this, privateKeyBase58, authorityPubkey, programId, {tag, seedBytes(batchId)}, c))
         return false;
-    }
-
-    // Derive batch PDA
-    std::vector<std::vector<uint8_t>> seeds = {
-        {'b', 'a', 't', 'c', 'h'},
-        std::vector<uint8_t>(batchId.begin(), batchId.end()),
-        base58ToPubkey(authorityPubkey)};
-
-    String pdaAddress;
-    uint8_t bump;
-    if (!derivePDA(seeds, programId, pdaAddress, bump))
-    {
-        return false;
-    }
-
-    Keypair signer = Keypair::fromPrivateKey(privateKey);
-    Pubkey authority = Pubkey::fromBase58(authorityPubkey);
-    Pubkey pda = Pubkey::fromBase58(pdaAddress);
-    Pubkey program = Pubkey::fromBase58(programId);
-    Pubkey systemProgram = Pubkey::fromBase58("11111111111111111111111111111111");
-
-    std::vector<uint8_t> discriminator = calculateDiscriminator("store_batch");
-    std::vector<uint8_t> instructionData = discriminator;
-
-    // Add batch_root (32 bytes)
-    std::vector<uint8_t> rootBytes;
-    for (size_t i = 0; i < batchRoot.length() && i < 64; i += 2)
-    {
-        String byteStr = batchRoot.substring(i, i + 2);
-        rootBytes.push_back(strtol(byteStr.c_str(), nullptr, 16));
-    }
-    instructionData.insert(instructionData.end(), rootBytes.begin(), rootBytes.end());
-
-    // Add batch_size (u32)
-    instructionData.push_back(batchSize & 0xFF);
-    instructionData.push_back((batchSize >> 8) & 0xFF);
-    instructionData.push_back((batchSize >> 16) & 0xFF);
-    instructionData.push_back((batchSize >> 24) & 0xFF);
-
-    // Add metadata (String)
-    uint32_t metaLen = metadata.length();
-    instructionData.push_back(metaLen & 0xFF);
-    instructionData.push_back((metaLen >> 8) & 0xFF);
-    instructionData.push_back((metaLen >> 16) & 0xFF);
-    instructionData.push_back((metaLen >> 24) & 0xFF);
-    instructionData.insert(instructionData.end(), metadata.begin(), metadata.end());
-
-    Instruction ix(
-        program,
-        {AccountMeta::writable(pda, false),
-         AccountMeta::writable(authority, true),
-         AccountMeta{systemProgram, false, false}},
-        instructionData);
-
-    String blockhash = getLatestBlockhash();
-    if (blockhash.isEmpty())
-        return false;
-
-    Transaction tx;
-    tx.fee_payer = authority;
-    tx.recent_blockhash = blockhash;
-    tx.add(ix);
-    applyPriorityFee(tx);
-    tx.sign({signer});
-
-    String txBase64 = tx.serializeBase64();
-    if (!sendRawTransaction(txBase64, outTxSignature))
-    {
-        return false;
-    }
-
-    _logInfo.println("✅ Batch stored: " + outTxSignature);
-    return confirmTransaction(outTxSignature, 5000);
+    BorshWriter w;
+    w.bytes(calculateDiscriminator("store_batch"));
+    if (!hash32(batchRoot, w)) return false;
+    w.u32(batchSize).str(metadata);
+    return anchorSend(*this, c,
+                      {AccountMeta::writable(c.pda, false), AccountMeta::writable(c.authority, true),
+                       AccountMeta{Pubkey::fromBase58(INFRATIC_SYSTEM_PROGRAM_ID), false, false}},
+                      w.data, outTxSignature);
 }
 
 

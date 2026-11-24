@@ -263,25 +263,46 @@ struct Transaction
 #include "infratic_txdecode.h"
 
 // ============================================================================
-// ZK STRUCTURES (Add to Infratic-lib.h before class declaration)
+// ZK / COMMITMENT STRUCTURES
+//
+// None of these is a zero-knowledge proof system. They are hash commitments,
+// Merkle trees and Ed25519 signed statements: what each one proves is written
+// next to the function that creates it (see "COMMITMENTS, MERKLE TREES AND
+// SIGNED ATTESTATIONS" in the Infratic class).
 // ============================================================================
 
+// Marks the old, misleading ZK names. They still compile and are kept so existing
+// sketches build, but the message names the honest replacement.
+#if defined(__GNUC__) || defined(__clang__)
+#define INFRATIC_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#else
+#define INFRATIC_DEPRECATED(msg)
+#endif
+
+/** Result of the batch commitment helper (one entry per input) */
 struct ZKCommitment
 {
-    String commitment;  // SHA256 hash of data
-    String nonce;       // Random nonce for security
-    uint64_t timestamp; // Creation timestamp
-    String metadata;    // Optional metadata
+    String commitment;  // SHA-256 commitment, 64 hex chars
+    String nonce;       // the 32 byte random opening secret, hex (keep it private)
+    uint64_t timestamp; // device uptime in ms when it was created (NOT a wall clock)
+    String metadata;    // free text
 };
 
+/**
+ * Merkle inclusion proof (RFC 6962 / RFC 9162 tree shape, see Infratic::buildMerkleTree).
+ * `root` inside the proof is only what the prover claims: always compare it with a root
+ * you trust (e.g. read from the chain), see the verifyMerkleProof overload with trustedRoot.
+ */
 struct MerkleProof
 {
-    String root;                  // Merkle root hash
-    std::vector<String> siblings; // Sibling hashes for proof path
-    size_t index;                 // Leaf index in tree
-    bool isValid;                 // Proof validity flag
+    String root;                  // claimed Merkle root, 64 hex chars
+    std::vector<String> siblings; // sibling hashes from leaf to root, 64 hex chars each
+    size_t index;                 // leaf index in the tree
+    bool isValid;                 // set by createMerkleProof, not evidence for anything
+    size_t leafCount;             // number of leaves of the tree (needed to verify)
 };
 
+/** Legacy container, only used by the deprecated createRangeProof/verifyRangeProof (they fail) */
 struct RangeProof
 {
     int64_t minValue;
@@ -291,11 +312,59 @@ struct RangeProof
     bool isValid;
 };
 
+/** Legacy container, only used by the deprecated createzkSNARKProof/verifyzkSNARKProof (they fail) */
 struct zkSNARKProof
 {
-    std::vector<uint8_t> proofData;    // Compressed proof data
-    std::vector<uint8_t> publicInputs; // Public inputs
+    std::vector<uint8_t> proofData;
+    std::vector<uint8_t> publicInputs;
     bool isValid;
+};
+
+/**
+ * Ed25519 signature by a device key over (context, commitment, publicData).
+ * Proves: the holder of `signer` vouched for this commitment and these public
+ * values. Does NOT prove anything about the committed data itself, and a verifier
+ * must trust the signer. It is an attestation, not a zero-knowledge proof.
+ */
+struct CommitmentAttestation
+{
+    String commitment;               // 64 hex chars
+    String context;                  // label such as "temp-sensor/v1" (signed, part of the statement)
+    std::vector<uint8_t> publicData; // public values the signer vouches for (signed)
+    String signer;                   // Base58 public key
+    String signature;                // 128 hex chars
+};
+
+/**
+ * Ed25519 signed statement "this device saw data with hash H at time T".
+ * Proves only that the signer claims it. The time comes from the cluster clock
+ * as read by the device over RPC, so it is as trustworthy as the device and its
+ * RPC node. For a time nobody has to trust, put the hash in a transaction and use
+ * that transaction's block time.
+ */
+struct SignedTimestamp
+{
+    String dataHash;   // SHA-256 of the data, 64 hex chars
+    int64_t unixTime;  // unix seconds
+    String blockhash;  // optional Base58 recent blockhash, signed along (may be empty)
+    String signer;     // Base58 public key
+    String signature;  // 128 hex chars
+};
+
+/**
+ * Signed claim "the value behind `commitment` lies in [minValue, maxValue]".
+ * The verifier does not see the value, but must TRUST the signer that the claim is
+ * true. This is NOT a cryptographic range proof (no zero-knowledge, nothing is proven
+ * about the value mathematically). The value can later be revealed with its opening
+ * secret and checked with Infratic::openRangeAttestation.
+ */
+struct RangeAttestation
+{
+    String commitment; // 64 hex chars
+    int64_t minValue;
+    int64_t maxValue;
+    String signer;     // Base58 public key
+    String signature;  // 128 hex chars
 };
 
 // ============================================================================
@@ -997,166 +1066,198 @@ public:
     String base64Encode(const uint8_t *data, size_t len);
 
     // ========================================================================
-    // ZERO-KNOWLEDGE PROOF OPERATIONS
+    // COMMITMENTS, MERKLE TREES AND SIGNED ATTESTATIONS ("ZK" helpers)
+    //
+    // Read this first: nothing here is zero-knowledge in the cryptographic sense.
+    //  - Commitments: hiding + binding (SHA-256 with a random 32 byte secret).
+    //  - Merkle trees: compact proof that one item is part of a set with a given root.
+    //  - Attestations: Ed25519 signatures by the device key. They prove WHO says
+    //    something, not that it is true.
+    // For real zkSNARKs/range proofs use a proper proof system (circom/snarkjs,
+    // Bulletproofs) off the device and anchor the result on chain.
     // ========================================================================
 
-    // ---- Section A: Hash-Based Commitments ----
+    // ---- Hash commitments ----
 
     /**
-     * @brief Creates a cryptographic commitment to hide data
-     * @param data Original data to commit
-     * @param secret Secret key for additional security
-     * @param outCommitment Output commitment hash
-     * @param outNonce Output nonce used in commitment
-     * @param outTimestamp
-     * @return true if successful
+     * @brief Commits to `data`. commitment = SHA-256("infratic-zk/commit/v1" || u32le(len) || data || secret).
+     * The commitment hides the data as long as `secret` (32 random bytes from the hardware RNG,
+     * returned in outSecret) stays private, and binds you to it: you cannot open it to other data.
+     * Keep outSecret; without it nobody can verify the commitment later.
      */
+    static bool commitData(const std::vector<uint8_t> &data, std::vector<uint8_t> &outCommitment,
+                           std::vector<uint8_t> &outSecret);
+
+    /** @brief Same as commitData with a secret you provide (32 bytes). Deterministic, for tests and re-derivation. */
+    static bool commitDataWithSecret(const std::vector<uint8_t> &data, const std::vector<uint8_t> &secret,
+                                     std::vector<uint8_t> &outCommitment);
+
+    /** @brief Checks an opening (data + secret) against a commitment, compared in constant time */
+    static bool verifyCommitment(const std::vector<uint8_t> &data, const std::vector<uint8_t> &secret,
+                                 const std::vector<uint8_t> &commitment);
+
+    /** @brief String/hex flavour of commitData: outCommitmentHex and outSecretHex are 64 hex chars each */
+    static bool commitString(const String &data, String &outCommitmentHex, String &outSecretHex);
+
+    /** @brief String/hex flavour of verifyCommitment. False on any malformed hex. */
+    static bool verifyCommitmentString(const String &data, const String &secretHex, const String &commitmentHex);
+
+    /**
+     * @brief Deprecated: use commitString. The `secret` text and `timestamp` are bound into the committed
+     * message, outNonce is the 32 byte random opening secret (hex), outTimestamp is device uptime in ms.
+     */
+    INFRATIC_DEPRECATED("use commitString/verifyCommitmentString: this is a plain hash commitment, not a zero-knowledge proof")
     bool createDataCommitment(const String &data, const String &secret,
                               String &outCommitment, String &outNonce, uint64_t &outTimestamp);
 
-    /**
-     * @brief Verifies data against a previously created commitment
-     * @param data Revealed data to verify
-     * @param secret Secret key used in original commitment
-     * @param nonce Nonce from original commitment
-     * @param timestamp Timestamp from original commitment
-     * @param originalCommitment Original commitment to verify against
-     * @return true if data matches commitment
-     */
+    /** @brief Deprecated: use verifyCommitmentString. Checks a commitment made by createDataCommitment (constant time). */
+    INFRATIC_DEPRECATED("use commitString/verifyCommitmentString")
     bool verifyDataCommitment(const String &data, const String &secret,
                               const String &nonce, uint64_t timestamp,
                               const String &originalCommitment);
 
     /**
-     * @brief Stores a ZK commitment on Solana blockchain
+     * @brief Writes a commitment to the chain as an SPL Memo: "ZK_COMMITMENT:<64 hex>[|META:<metadata>]".
+     * This makes the commitment public and gives it the block time of the transaction (the only time
+     * statement here that does not rely on the device). The commitment must be 64 hex chars; the
+     * metadata must fit the memo (max 400 bytes) and must not be secret.
      * @param privateKeyBase58 Transaction signer's private key
-     * @param fromPubkeyBase58 Sender's public key
-     * @param commitment Commitment hash to store
-     * @param metadata Additional metadata
-     * @param outTxSignature Transaction signature
-     * @return true if stored successfully
+     * @param fromPubkeyBase58 Sender's public key (fee payer)
+     * @param commitment 64 hex chars (a commitment, Merkle root or any 32 byte hash)
+     * @param metadata Public metadata, may be empty
+     * @param outTxSignature Signature of the memo transaction
+     * @return true if the transaction was confirmed
      */
     bool storeCommitmentOnChain(const String &privateKeyBase58,
                                 const String &fromPubkeyBase58,
                                 const String &commitment, const String &metadata,
                                 String &outTxSignature);
 
-    // ---- Section B: Merkle Tree Proofs ----
+    // ---- Merkle trees ----
+    // Shape and hashing follow RFC 6962 / RFC 9162: leaf = SHA-256(0x00 || data),
+    // node = SHA-256(0x01 || left || right); a tree of n > 1 leaves splits into a left part of the
+    // largest power of two smaller than n leaves and a right part with the rest. An odd node is
+    // never duplicated (that would let two different lists share a root). Hashes are 64 hex chars.
+    // Max 4096 leaves on the device (memory).
+
+    /** @brief Merkle root of the given items (each item hashed as a leaf). Fails on an empty list. */
+    static bool buildMerkleTree(const std::vector<String> &dataList, String &outRoot);
+
+    /** @brief Inclusion proof for dataList[dataIndex] (siblings from leaf to root, plus index, leafCount, root) */
+    static bool createMerkleProof(const std::vector<String> &dataList, size_t dataIndex,
+                                  MerkleProof &outProof);
 
     /**
-     * @brief Builds a Merkle tree from data list
-     * @param dataList Vector of data strings
-     * @param outRoot Output Merkle root hash
-     * @return true if successful
+     * @brief Checks that `data` is the leaf proof.index of a tree with proof.leafCount leaves and
+     * the root `trustedRootHex`. Use a root you got from a trusted place (chain, your own storage).
      */
-    bool buildMerkleTree(const std::vector<String> &dataList, String &outRoot);
+    static bool verifyMerkleProof(const String &data, const MerkleProof &proof, const String &trustedRootHex);
 
     /**
-     * @brief Generates a Merkle proof for specific data item
-     * @param dataList Complete data list
-     * @param dataIndex Index of data to prove
-     * @param outProof Output MerkleProof structure
-     * @return true if successful
+     * @brief Deprecated: checks against the root INSIDE the proof, which proves nothing because the
+     * prover chose it. Use the overload with a trusted root.
      */
-    bool createMerkleProof(const std::vector<String> &dataList, size_t dataIndex,
-                           MerkleProof &outProof);
+    INFRATIC_DEPRECATED("compares with proof.root which the prover controls: pass a trusted root to verifyMerkleProof")
+    static bool verifyMerkleProof(const String &data, const MerkleProof &proof);
+
+    // ---- Signed attestations (Ed25519, verifiable by anyone with the signer's public key) ----
 
     /**
-     * @brief Verifies a Merkle proof
-     * @param data Data to verify
-     * @param proof Merkle proof structure
-     * @return true if proof is valid
+     * @brief Signs "commitment attestation": Ed25519 over
+     * "infratic-zk/attest/v1" || u32le(len)||context || commitment(32) || u32le(len)||publicData.
+     * Proves that the key owner vouches for these values. Replaces the fake zkSNARK.
      */
-    bool verifyMerkleProof(const String &data, const MerkleProof &proof);
+    static bool createCommitmentAttestation(const Keypair &device, const String &commitmentHex,
+                                            const String &context, const std::vector<uint8_t> &publicData,
+                                            CommitmentAttestation &out);
 
-    // ---- Section C: Range Proofs ----
+    /** @brief Verifies the signature AND that it was made by `expectedSignerBase58` (pass att.signer to accept any key, knowing that proves little) */
+    static bool verifyCommitmentAttestation(const CommitmentAttestation &att, const String &expectedSignerBase58);
 
     /**
-     * @brief Creates a range proof showing value is between min and max
-     * @param value Secret value to prove
-     * @param minValue Minimum allowed value
-     * @param maxValue Maximum allowed value
-     * @param secret Secret key for commitment
-     * @param outProof Output RangeProof structure
-     * @return true if successful
+     * @brief Signs "device saw data with this hash at unixTime" (Ed25519 over
+     * "infratic-zk/timestamp/v1" || sha256(data) || i64le(unixTime) || u32le(len)||blockhash).
+     * Offline-capable: you pass the time. See SignedTimestamp for what this does and does not prove.
      */
-    bool createRangeProof(int64_t value, int64_t minValue, int64_t maxValue,
-                          const String &secret, RangeProof &outProof);
+    static bool signTimestamp(const Keypair &device, const std::vector<uint8_t> &data, int64_t unixTime,
+                              const String &blockhash, SignedTimestamp &out);
+
+    /** @brief Reads cluster time and a recent blockhash over RPC, then signTimestamp. False if the time is unavailable (no uptime fallback). */
+    bool createSignedTimestamp(const Keypair &device, const std::vector<uint8_t> &data, SignedTimestamp &out);
+
+    /** @brief Verifies the signature, the signer and that `data` hashes to ts.dataHash */
+    static bool verifySignedTimestamp(const SignedTimestamp &ts, const std::vector<uint8_t> &data,
+                                      const String &expectedSignerBase58);
 
     /**
-     * @brief Verifies a range proof
-     * @param value Revealed value to verify
-     * @param secret Secret used in original commitment
-     * @param proof Range proof to verify
-     * @return true if value is in range
+     * @brief Signed claim that a hidden value lies in [minValue, maxValue]; NOT a range proof (see RangeAttestation).
+     * The commitment is commitData over the value as 8 bytes (i64 little endian); the opening secret goes to outSecret.
+     * Fails if the value is outside the range.
      */
-    bool verifyRangeProof(int64_t value, const String &secret, const RangeProof &proof);
+    static bool createRangeAttestation(const Keypair &device, int64_t value, int64_t minValue, int64_t maxValue,
+                                       RangeAttestation &out, std::vector<uint8_t> &outSecret);
 
-    // ---- Section D: zkSNARK (Simplified) ----
+    /** @brief Verifies signature and signer of a range attestation (does not learn the value) */
+    static bool verifyRangeAttestation(const RangeAttestation &att, const String &expectedSignerBase58);
+
+    /** @brief Reveals the value: checks the attestation, that the opening matches the commitment and that the value is in range */
+    static bool openRangeAttestation(const RangeAttestation &att, int64_t value,
+                                     const std::vector<uint8_t> &secret, const String &expectedSignerBase58);
+
+    // ---- Deprecated names that cannot be implemented honestly ----
 
     /**
-     * @brief Creates a zkSNARK proof (simplified for ESP32)
-     * @param privateData Private data to prove knowledge of
-     * @param publicInputs Public inputs visible to verifier
-     * @param circuit Circuit description
-     * @param outProof Output zkSNARK proof
-     * @return true if successful
+     * @brief Deprecated and not supported: always returns false. The old version only hashed the inputs
+     * and appended 64 random bytes, which looked like a proof and proved nothing. Use createCommitmentAttestation.
      */
+    INFRATIC_DEPRECATED("not a zkSNARK and not supported (returns false): use createCommitmentAttestation")
     bool createzkSNARKProof(const std::vector<uint8_t> &privateData,
                             const std::vector<uint8_t> &publicInputs,
                             const String &circuit, zkSNARKProof &outProof);
 
-    /**
-     * @brief Verifies a zkSNARK proof
-     * @param proof zkSNARK proof to verify
-     * @param expectedPublicInputs Expected public inputs
-     * @return true if proof is valid
-     */
+    /** @brief Deprecated and not supported: always returns false (nothing can be verified). Use verifyCommitmentAttestation. */
+    INFRATIC_DEPRECATED("not a zkSNARK verifier (returns false): use verifyCommitmentAttestation")
     bool verifyzkSNARKProof(const zkSNARKProof &proof,
                             const std::vector<uint8_t> &expectedPublicInputs);
 
-    // ---- Section E: Timestamped Proofs ----
+    /** @brief Deprecated and not supported: always returns false. Use createRangeAttestation (signed claim) or a real range proof system. */
+    INFRATIC_DEPRECATED("not a range proof (returns false): use createRangeAttestation")
+    bool createRangeProof(int64_t value, int64_t minValue, int64_t maxValue,
+                          const String &secret, RangeProof &outProof);
+
+    /** @brief Deprecated and not supported: always returns false. The old version only compared the revealed value with the range. */
+    INFRATIC_DEPRECATED("not a range proof (returns false): use verifyRangeAttestation/openRangeAttestation")
+    bool verifyRangeProof(int64_t value, const String &secret, const RangeProof &proof);
 
     /**
-     * @brief Creates a timestamped proof of data existence
-     * @param data Data to timestamp
-     * @param outProof Output proof string
-     * @param outTimestamp Output timestamp
-     * @return true if successful
+     * @brief Deprecated: unsigned hash of data, time and blockhash. Anyone can recompute it for any data and
+     * time, so it proves nothing. The time is now the cluster unix time (false if unavailable).
+     * Use createSignedTimestamp.
      */
+    INFRATIC_DEPRECATED("an unsigned hash proves nothing about time: use createSignedTimestamp")
     bool createTimestampedProof(const String &data, String &outProof,
                                 uint64_t &outTimestamp, String &outBlockhash);
-    /**
-     * @brief Verifies a timestamped proof
-     * @param data Original data
-     * @param proof Proof hash
-     * @param timestamp Claimed timestamp
-     * @param blockhash Blockchain anchor
-     * @return true if proof matches
-     */
+
+    /** @brief Deprecated: recomputes the hash made by createTimestampedProof (constant time compare). Use verifySignedTimestamp. */
+    INFRATIC_DEPRECATED("use verifySignedTimestamp")
     bool verifyTimestampedProof(const String &data, const String &proof,
                                 uint64_t timestamp, const String &blockhash);
 
-    // ---- Section F: Batch Operations ----
+    // ---- Batches ----
 
     /**
-     * @brief Creates multiple commitments in batch
-     * @param dataList Vector of data strings
-     * @param secret Shared secret for all commitments
-     * @param outCommitments Output vector of commitments
-     * @return true if successful
+     * @brief One commitment (fresh random secret each) per item. ZKCommitment.nonce holds that secret (hex): keep it
+     * private, it is needed to open the commitment with verifyCommitmentString(data, nonce, commitment).
+     * The `secret` text is ignored (kept for source compatibility): the per-item random secret does the hiding.
+     * Commitments of one batch can be anchored with one Merkle root (storeBatchCommitmentsOnChain).
      */
     bool createBatchCommitments(const std::vector<String> &dataList,
                                 const String &secret,
                                 std::vector<ZKCommitment> &outCommitments);
 
     /**
-     * @brief Stores batch commitments on-chain efficiently
-     * @param privateKeyBase58 Signer's private key
-     * @param fromPubkeyBase58 Sender's public key
-     * @param commitments Vector of commitments
-     * @param outTxSignature Transaction signature
-     * @return true if successful
+     * @brief Writes the Merkle root over the commitments (leaf = the commitment's 64 hex chars as text)
+     * to the chain as a memo "ZK_COMMITMENT:<root>|META:batch_size:<n>". Max 4096 commitments.
      */
     bool storeBatchCommitmentsOnChain(const String &privateKeyBase58,
                                       const String &fromPubkeyBase58,
@@ -1165,17 +1266,16 @@ public:
 
     // ========================================================================
     // ANCHOR PROGRAM STORAGE OPERATIONS
+    // These talk to YOUR Anchor program. Instruction data = sha256("global:<name>")[0..8] followed by
+    // the Borsh encoded arguments listed per function. Hashes are given as 64 hex chars and sent as [u8;32].
+    // Timestamps are the cluster unix time (i64/u64 LE), read over RPC; the call fails if it is unavailable.
     // ========================================================================
 
     /**
-     * @brief Initialize ZK storage account on Anchor program
-     * @param privateKeyBase58 Authority's private key
-     * @param authorityPubkey Authority's public key
-     * @param programId Anchor program ID
-     * @param seedName Seed name for PDA derivation
-     * @param outPDA Derived PDA address
-     * @param outTxSignature Transaction signature
-     * @return true if successful
+     * @brief Initialize ZK storage account on Anchor program ("initialize_storage(seed_name: String)").
+     * Accounts: [pda (w), authority (w, signer), system program]. PDA seeds: [seedName, authority].
+     * If the PDA already holds lamports nothing is sent and outTxSignature is "EXISTING_ACCOUNT".
+     * @return true if successful (or already exists)
      */
     bool initializeZKStorage(
         const String &privateKeyBase58,
@@ -1186,15 +1286,8 @@ public:
         String &outTxSignature);
 
     /**
-     * @brief Store commitment in Anchor program (permanent storage)
-     * @param privateKeyBase58 Authority's private key
-     * @param authorityPubkey Authority's public key
-     * @param programId Anchor program ID
-     * @param seedName Seed name for PDA
-     * @param commitment Commitment hash (32 bytes hex)
-     * @param metadata Metadata string
-     * @param outTxSignature Transaction signature
-     * @return true if successful
+     * @brief "store_commitment(commitment: [u8;32], metadata: String, timestamp: u64)".
+     * Accounts: [pda (w), authority (signer)]. PDA seeds: [seedName, authority].
      */
     bool storeCommitmentInAnchor(
         const String &privateKeyBase58,
@@ -1205,17 +1298,7 @@ public:
         const String &metadata,
         String &outTxSignature);
 
-    /**
-     * @brief Update existing commitment in Anchor program
-     * @param privateKeyBase58 Authority's private key
-     * @param authorityPubkey Authority's public key
-     * @param programId Anchor program ID
-     * @param seedName Seed name for PDA
-     * @param newCommitment New commitment hash
-     * @param metadata New metadata
-     * @param outTxSignature Transaction signature
-     * @return true if successful
-     */
+    /** @brief "update_commitment(new_commitment: [u8;32], metadata: String, timestamp: u64)", same accounts as store */
     bool updateCommitmentInAnchor(
         const String &privateKeyBase58,
         const String &authorityPubkey,
@@ -1226,16 +1309,8 @@ public:
         String &outTxSignature);
 
     /**
-     * @brief Store Merkle root in Anchor program
-     * @param privateKeyBase58 Authority's private key
-     * @param authorityPubkey Authority's public key
-     * @param programId Anchor program ID
-     * @param seedName Seed name for PDA
-     * @param merkleRoot Merkle root hash
-     * @param leafCount Number of leaves in tree
-     * @param metadata Additional metadata
-     * @param outTxSignature Transaction signature
-     * @return true if successful
+     * @brief "store_merkle_root(merkle_root: [u8;32], leaf_count: u32, metadata: String)".
+     * Accounts: [pda (w), authority (signer)]. Use the root from buildMerkleTree.
      */
     bool storeMerkleRootInAnchor(
         const String &privateKeyBase58,
@@ -1248,16 +1323,8 @@ public:
         String &outTxSignature);
 
     /**
-     * @brief Store batch commitments in Anchor program
-     * @param privateKeyBase58 Authority's private key
-     * @param authorityPubkey Authority's public key
-     * @param programId Anchor program ID
-     * @param batchId Unique batch identifier
-     * @param batchRoot Merkle root of all commitments
-     * @param batchSize Number of commitments
-     * @param metadata Batch metadata
-     * @param outTxSignature Transaction signature
-     * @return true if successful
+     * @brief "store_batch(batch_root: [u8;32], batch_size: u32, metadata: String)".
+     * Accounts: [pda (w), authority (w, signer), system program]. PDA seeds: ["batch", batchId, authority].
      */
     bool storeBatchInAnchor(
         const String &privateKeyBase58,
